@@ -1,0 +1,12 @@
+extends: base.yaml
+dataset:
+  name: null
+  path: null
+  # Register a verified physiological dataset adapter, or use --prepared.
+training:
+  target: driver_state_risk
+  score_labels: []
+pipeline:
+  vehicle_window_seconds: 10
+  physiology_window_seconds: 60
+  physiology_quality_threshold: 0.5

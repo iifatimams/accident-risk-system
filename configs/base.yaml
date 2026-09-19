@@ -1,0 +1,44 @@
+random_seed: 42
+paths:
+  raw: data/raw
+  processed: data/processed
+  artifacts: artifacts
+logging:
+  level: INFO
+pipeline:
+  vehicle_window_seconds: 10
+  physiology_window_seconds: 60
+  stride_seconds: 1
+  min_samples: 2
+  prediction_horizon_seconds: 0
+  default_max_age_seconds: 2
+  max_age_seconds:
+    gps_latitude: 5
+    gps_longitude: 5
+    gps_speed: 5
+    heart_rate: 30
+    spo2: 60
+    hrv_rmssd: 60
+    rr_interval_ms: 5
+    physiology_signal_quality: 60
+  physiology_quality_threshold: 0.5
+  spo2_drop_threshold: 3
+  # Device axes are NOT anatomical axes unless mounting is verified.
+  longitudinal_axis: null
+  lateral_axis: null
+  quality_fields: [accel_x, accel_y, accel_z, vehicle_speed]
+fusion:
+  weights: {vehicle_risk_score: 0.5, driver_state_risk: 0.2, event_detection_score: 0.3}
+  thresholds: [0.3, 0.6, 0.8]
+training:
+  models: [logistic_regression, random_forest, xgboost]
+  class_weight: balanced
+  validation_size: 0.2
+  test_size: 0.2
+  target: event_detection_score
+  score_labels: [crash, near_miss]
+  # Future prediction requires explicitly mapped event onset timestamps.
+  future_annotations_complete: false
+  # Reject future targets spanning an unobserved gap larger than this limit.
+  max_followup_gap_seconds: 2
+  selection_metric: pr_auc

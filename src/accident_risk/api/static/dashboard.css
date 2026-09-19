@@ -1,0 +1,25 @@
+.full-width-card{grid-column:1/-1}
+.real-map{height:430px;min-height:430px;z-index:0}
+.map-loading,.map-unavailable{height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:7px;color:var(--muted);font-size:12px}
+.map-unavailable strong{color:var(--ink);font-size:15px}
+.map-footer{display:flex;justify-content:space-between;align-items:center;padding:11px 2px 0;color:var(--muted);font-size:10px}
+.map-footer span:first-child{display:flex;align-items:center;gap:7px}
+.map-footer i{width:16px;height:4px;border-radius:4px;background:var(--teal)}
+.vehicle-marker-wrap{background:transparent;border:0}
+.vehicle-map-marker{width:46px;height:46px;display:grid;place-items:center;border:4px solid #fff;border-radius:50%;background:var(--teal);color:#fff;box-shadow:0 6px 20px rgba(18,51,47,.35)}
+.vehicle-map-marker svg{width:25px;stroke-width:2}
+.leaflet-control-attribution{font-size:8px!important}
+.event-banner{display:flex;align-items:center;gap:11px;margin:-2px 0 13px;padding:10px 12px;border:1px solid #dce8e5;border-radius:12px;background:#f5faf8}
+.event-banner>span{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;background:#fff;color:var(--risk-color,var(--teal))}
+.event-banner svg{width:19px}.event-banner small,.event-banner strong{display:block}.event-banner small{font-size:9px;color:var(--muted);margin-bottom:3px}.event-banner strong{font-size:12px}
+.packet-count{padding:7px 10px;border-radius:999px;background:#eaf6f3;color:var(--teal);font-size:10px;font-weight:800}
+.telemetry-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.telemetry-group{min-width:0;border:1px solid var(--line);border-radius:15px;background:#fbfdfc;padding:14px}
+.group-title{display:flex;align-items:center;gap:10px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.group-title strong,.group-title small{display:block}.group-title strong{font-size:12px}.group-title small{font-size:9px;color:var(--muted);margin-top:3px}
+.telemetry-group dl{margin:8px 0 0}.telemetry-group dl>div{display:flex;justify-content:space-between;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid #edf2f0}.telemetry-group dl>div:last-child{border-bottom:0}
+.telemetry-group dt{font-size:9px;color:var(--muted)}.telemetry-group dd{margin:0;text-align:right;font-size:10px;font-weight:750;font-variant-numeric:tabular-nums}
+.reading-pill{display:inline-block;padding:4px 7px;border-radius:999px;font-size:9px}.reading-pill.normal{background:#e8f6ef;color:#17714f}.reading-pill.alert{background:#fbe8e8;color:#a63131}
+.warning-reading{color:#c13d3d!important}.tire-grid dd{transition:color .2s}.risk-card{border-top:3px solid var(--risk-color,var(--green))}
+@media(max-width:1150px){.telemetry-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:680px){.real-map{height:330px;min-height:330px}.map-footer{align-items:flex-start;flex-direction:column;gap:5px}.telemetry-grid{grid-template-columns:1fr}}

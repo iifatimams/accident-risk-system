@@ -1,0 +1,5 @@
+extends: base.yaml
+replay:
+  speed: 1
+  maximum_speed: false
+  output: artifacts/replay_predictions.csv
