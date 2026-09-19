@@ -1,0 +1,19 @@
+extends: base.yaml
+dataset:
+  name: vzcrash
+  path: data/raw/vzcrash
+  # Fill these ONLY after inspect_dataset.py and source documentation review.
+  mapping:
+    confirmed: false
+    files: []
+    timestamp_column: null
+    timestamp_unit: null
+    stream_column: null
+    columns: {}
+    units: {}
+    groups: {}
+    label_column: null
+    label_map: {}
+    label_interpretation: null
+    event_timestamp_column: null
+    context_columns: []
