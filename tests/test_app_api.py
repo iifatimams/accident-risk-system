@@ -91,7 +91,14 @@ def test_administrator_inherits_manager_routes(client, people):
         assert client.get(path, headers=headers).status_code == 200, path
 
 
-def test_session_lifecycle_and_ingestion(client, people):
+def test_session_lifecycle_and_ingestion(client, people, monkeypatch):
+    """Keep live-session time and synthetic frame time in Unix seconds UTC aligned."""
+    clock = [1_000_000.0]
+    monkeypatch.setattr("time.time", lambda: clock[0])
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
     headers = sign_in(client, "+971501110001")
     started = client.post("/app/api/driver/session/start", headers=headers, json={})
     assert started.status_code == 200
@@ -103,8 +110,9 @@ def test_session_lifecycle_and_ingestion(client, people):
     ).status_code == 409
 
     for step in range(6):
+        clock[0] = 1_000_000.0 + step
         frame = {
-            "timestamp": 1_000_000 + step,
+            "timestamp": clock[0],
             "source": "synthetic_test",
             "stream_id": stream_id,
             "vehicle_speed": 10 + step,
