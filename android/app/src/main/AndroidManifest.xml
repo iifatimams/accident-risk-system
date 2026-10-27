@@ -1,35 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+    xmlns:tools="http://schemas.android.com/tools"
+    package="ae.aus.roadsense">
 
-    <!-- Internet, for streaming frames to the server. -->
+    <!-- Internet for streaming frames to remote laptop/ngrok -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Bluetooth on Android 11 and below. -->
-    <uses-permission android:name="android.permission.BLUETOOTH"
-        android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
-        android:maxSdkVersion="30" />
+    <!-- High-frequency IMU sensor polling (Accelerometer & Gyroscope) -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
 
-    <!-- Bluetooth on Android 12 and above. -->
+    <!-- Bluetooth Legacy (Required for RFCOMM socket compatibility with ELM327 OBD-II) -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+
+    <!-- Bluetooth Modern (Android 12+ / API 31+) -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />
 
-    <!-- Position, for the live map and collision reporting. -->
+    <!-- Location for GPS, live map, and collision context -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- The capture service must keep running with the screen off. This is the
-         whole reason for a native app: it is what Car Scanner could not do. -->
+    <!-- Foreground Service permissions (Android 14 / API 34 strict compliance) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Hardware Feature Declarations -->
     <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <uses-feature android:name="android.hardware.location.gps" android:required="false" />
@@ -54,9 +56,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Persistent Foreground Telemetry Streaming Service -->
         <service
-            android:name=".CaptureService"
+            android:name=".TelemetryService"
+            android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="location|connectedDevice" />
+
     </application>
+
 </manifest>

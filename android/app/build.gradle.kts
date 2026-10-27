@@ -37,4 +37,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-service:2.8.4")
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // Networking library to send data to your laptop over the internet
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
