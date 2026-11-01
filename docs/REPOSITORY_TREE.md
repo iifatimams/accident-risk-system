@@ -1,9 +1,6 @@
 # Repository tree
 
-Snapshot of the local workspace on 2026-10-03, including tracked, untracked, and
-ignored project files, datasets, logs, and generated model artifacts.
-Virtual environment, Git metadata, package metadata, and cache directories are
-shown with their contents collapsed. File entries show names only.
+This is a snapshot of the current repository layout as it exists in this workspace. Hidden infrastructure folders such as `.git`, `.venv`, cache directories, and generated build output are collapsed for readability.
 
 ```text
 accident-risk-system/
@@ -11,6 +8,22 @@ accident-risk-system/
 ├── .pytest_cache/ [contents collapsed]
 ├── .ruff_cache/ [contents collapsed]
 ├── .venv/ [contents collapsed]
+├── android/
+│   ├── .gradle/ [contents collapsed]
+│   ├── app/
+│   │   ├── build/ [contents collapsed]
+│   │   ├── src/
+│   │   ├── .DS_Store
+│   │   ├── build.gradle.kts
+│   │   └── proguard-rules.pro
+│   ├── gradle/
+│   ├── .gitignore
+│   ├── build.gradle.kts
+│   ├── gradle.properties
+│   ├── gradlew
+│   ├── gradlew.bat
+│   ├── local.properties
+│   └── settings.gradle.kts
 ├── artifacts/
 │   ├── synthetic_smoke/
 │   │   ├── input/
@@ -53,18 +66,38 @@ accident-risk-system/
 │   ├── replay.yaml
 │   └── vzcrash.yaml
 ├── data/
+│   ├── app.sqlite3
 │   ├── interim/
 │   │   └── .gitkeep
 │   ├── processed/
 │   │   └── .gitkeep
-│   └── raw/
-│       ├── .gitkeep
-│       ├── whoop_ble_30s_vitals.csv
-│       └── whoop_vitals_continuous.csv
+│   ├── raw/
+│   │   ├── .gitkeep
+│   │   ├── obd_entries.csv
+│   │   ├── polidriving/
+│   │   ├── whoop_ble_30s_vitals.csv
+│   │   └── ...
+│   └── recordings/
+│       ├── realtime_telemetry_20261026_163313.csv
+│       ├── realtime_telemetry_20261026_163434.csv
+│       ├── realtime_telemetry_20261027_113941.csv
+│       ├── realtime_telemetry_20261027_115220.csv
+│       ├── realtime_telemetry_20261027_120405.csv
+│       ├── realtime_telemetry_20261027_121817.csv
+│       ├── realtime_telemetry_20261027_123124.csv
+│       ├── realtime_telemetry_20261027_124228.csv
+│       ├── realtime_telemetry_20261027_125949.csv
+│       ├── realtime_telemetry_20261027_132722.csv
+│       ├── realtime_telemetry_20261027_155532.csv
+│       ├── realtime_telemetry_20261027_160940.csv
+│       └── realtime_telemetry_20261027_161806.csv
 ├── docs/
+│   ├── ANDROID.md
 │   ├── ARCHITECTURE.md
 │   ├── DATASETS.md
+│   ├── INTERFACE.md
 │   ├── LIVE_HARDWARE.md
+│   ├── LIVE_SETUP.md
 │   ├── MODEL_LIMITATIONS.md
 │   ├── REPOSITORY_TREE.md
 │   └── VERIFICATION.md
@@ -76,28 +109,33 @@ accident-risk-system/
 │   ├── prepare_polidriving.py
 │   ├── prepare_vzcrash.py
 │   ├── replay.py
+│   ├── run_advanced_terminal.py
+│   ├── run_live_terminal.py
 │   ├── serve.py
-│   ├── smoke_test.py
 │   ├── stream_whoop_ble_csv.py
 │   ├── test_obd.py
 │   ├── train_physiology.py
-│   └── train_vehicle.py
+│   ├── train_vehicle.py
+│   ├── train_vzcrash_3class.py
+│   ├── with_openmp.py
+│   └── ...
 ├── src/
 │   ├── accident_risk/
 │   │   ├── __pycache__/ [contents collapsed]
 │   │   ├── api/
 │   │   │   ├── __pycache__/ [contents collapsed]
 │   │   │   ├── static/
-│   │   │   │   ├── app.js
-│   │   │   │   ├── dashboard.css
-│   │   │   │   ├── index.html
-│   │   │   │   └── styles.css
 │   │   │   ├── __init__.py
-│   │   │   └── main.py
+│   │   │   ├── auth.py
+│   │   │   ├── db.py
+│   │   │   ├── main.py
+│   │   │   ├── recorder.py
+│   │   │   └── routes_app.py
 │   │   ├── datasets/
 │   │   │   ├── __pycache__/ [contents collapsed]
 │   │   │   ├── __init__.py
 │   │   │   ├── base.py
+│   │   │   ├── physiology.py
 │   │   │   ├── polidriving.py
 │   │   │   ├── registry.py
 │   │   │   └── vzcrash.py
@@ -117,17 +155,22 @@ accident-risk-system/
 │   │   ├── processing/
 │   │   │   ├── __pycache__/ [contents collapsed]
 │   │   │   ├── __init__.py
+│   │   │   ├── map_context.py
 │   │   │   ├── physiology_features.py
 │   │   │   ├── pipeline.py
 │   │   │   ├── synchronization.py
 │   │   │   ├── validation.py
 │   │   │   ├── vehicle_features.py
+│   │   │   ├── weather_context.py
 │   │   │   └── windows.py
 │   │   ├── sources/
 │   │   │   ├── __pycache__/ [contents collapsed]
 │   │   │   ├── __init__.py
 │   │   │   ├── base.py
+│   │   │   ├── hardware.py
 │   │   │   ├── live_buffer.py
+│   │   │   ├── live_hardware.py
+│   │   │   ├── recording.py
 │   │   │   └── replay.py
 │   │   ├── training/
 │   │   │   ├── __pycache__/ [contents collapsed]
@@ -142,7 +185,7 @@ accident-risk-system/
 │   │   ├── schemas.py
 │   │   ├── settings.py
 │   │   └── synthetic.py
-│   ├── accident_risk.egg-info/ [contents collapsed]
+│   ├── accident_risk.egg-info/
 │   └── .DS_Store
 ├── tests/
 │   ├── __pycache__/ [contents collapsed]
@@ -151,11 +194,16 @@ accident-risk-system/
 │   ├── __init__.py
 │   ├── conftest.py
 │   ├── test_api.py
+│   ├── test_app_api.py
+│   ├── test_app_store.py
 │   ├── test_datasets.py
 │   ├── test_features.py
+│   ├── test_hardware.py
 │   ├── test_inference.py
+│   ├── test_live_display.py
 │   ├── test_models.py
 │   ├── test_processing.py
+│   ├── test_recording.py
 │   ├── test_replay.py
 │   ├── test_schemas.py
 │   ├── test_splits.py
@@ -165,11 +213,19 @@ accident-risk-system/
 ├── .env.example
 ├── .gitignore
 ├── .whoop_tokens.json
-├── Accident_Risk_Model_Explained.pdf
 ├── AGENTS.md
+├── README.md
+├── pyproject.toml
+├── package.json
+├── package-lock.json
+├── repomix-output.xml
+├── test 18-10-2026.csv
+├── Accident_Risk_Model_Explained.pdf
 ├── harvest.log
 ├── preview-9780273775324_A37747616.pdf
-├── pyproject.toml
-├── README.md
-└── research-writing-style.md
+├── research-writing-style.md
+└── ...
+```
+
+This tree reflects the current workspace state and includes the Android app, dataset recordings, core Python package, scripts, docs, and test suite.
 ```

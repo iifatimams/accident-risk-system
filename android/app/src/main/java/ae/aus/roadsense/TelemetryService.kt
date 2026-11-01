@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
@@ -13,7 +14,6 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -29,7 +29,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.ParcelUuid
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -58,11 +57,12 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
     private var gyroMag: Double = 0.0
     private var isStreaming = false
 
-    // WHOOP GATT Heart Rate Management
     @Volatile private var liveHeartRate: Int = 0
-    private var isWhoopConnected = false
+    @Volatile private var isWhoopConnected = false
     private var bluetoothGatt: BluetoothGatt? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
+    private var isScanning = false
+    private var obdWorkerThread: Thread? = null
 
     companion object {
         private const val CHANNEL_ID = "RoadSenseTelemetryChannel"
@@ -88,8 +88,7 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
         sensorManager.registerListener(this, gyro, SensorManager.SENSOR_DELAY_GAME)
 
         initializeLocation()
-        connectToObdBluetooth()
-        connectToWhoopGatt()
+        startObdPollingThread()
         startStreamingLoop()
     }
 
@@ -103,44 +102,83 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
             bestLocation?.let {
                 currentLat = it.latitude
                 currentLon = it.longitude
-                Log.d("TelemetryService", "Initial location acquired: $currentLat, $currentLon")
             }
 
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
             locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 1000L, 0f, this)
         } catch (e: Exception) {
-            Log.e("TelemetryService", "Location registration error: ${e.message}")
+            Log.e("TelemetryService", "Location error: ${e.message}")
         }
     }
 
+    private fun startObdPollingThread() {
+        isStreaming = true
+        obdWorkerThread = Thread {
+            while (isStreaming) {
+                if (obdManager.isConnected) {
+                    obdManager.pollObdData()
+                    try { Thread.sleep(60) } catch (e: Exception) {}
+                } else {
+                    ensureObdConnected()
+                    try { Thread.sleep(2000) } catch (e: Exception) {}
+                }
+            }
+        }.apply { start() }
+    }
+
     @SuppressLint("MissingPermission")
-    private fun connectToWhoopGatt() {
+    private fun ensureWhoopConnected() {
+        if (isWhoopConnected || isScanning) return
+
         try {
             val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
             bluetoothAdapter = bluetoothManager.adapter ?: return
-            val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
 
-            val filter = ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(HR_SERVICE_UUID))
-                .build()
+            val bondedWhoop = bluetoothAdapter?.bondedDevices?.firstOrNull { device ->
+                val name = device.name?.uppercase() ?: ""
+                name.contains("WHOOP")
+            }
+
+            if (bondedWhoop != null) {
+                bluetoothGatt = bondedWhoop.connectGatt(
+                    this@TelemetryService,
+                    false,
+                    gattCallback,
+                    BluetoothDevice.TRANSPORT_LE
+                )
+                return
+            }
+
+            val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
             val settings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build()
 
-            scanner.startScan(listOf(filter), settings, object : ScanCallback() {
+            isScanning = true
+            scanner.startScan(null, settings, object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult?) {
                     val device = result?.device ?: return
-                    val name = device.name?.uppercase() ?: ""
+                    val name = (device.name ?: result.scanRecord?.deviceName ?: "").uppercase()
 
                     if (name.contains("WHOOP")) {
-                        scanner.stopScan(this)
-                        Log.d("TelemetryService", "Found WHOOP BLE device: ${device.name}. Connecting GATT...")
-                        bluetoothGatt = device.connectGatt(this@TelemetryService, false, gattCallback)
+                        try { scanner.stopScan(this) } catch (e: Exception) {}
+                        isScanning = false
+
+                        bluetoothGatt = device.connectGatt(
+                            this@TelemetryService,
+                            false,
+                            gattCallback,
+                            BluetoothDevice.TRANSPORT_LE
+                        )
                     }
+                }
+
+                override fun onScanFailed(errorCode: Int) {
+                    isScanning = false
                 }
             })
         } catch (e: Exception) {
-            Log.e("TelemetryService", "WHOOP GATT scan error: ${e.message}")
+            isScanning = false
         }
     }
 
@@ -148,12 +186,13 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.d("TelemetryService", "WHOOP GATT Connected. Discovering services...")
+                isWhoopConnected = true
                 gatt?.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 isWhoopConnected = false
                 liveHeartRate = 0
-                Log.d("TelemetryService", "WHOOP GATT Disconnected.")
+                gatt?.close()
+                bluetoothGatt = null
             }
         }
 
@@ -174,7 +213,6 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
                         @Suppress("DEPRECATION")
                         gatt.writeDescriptor(descriptor)
                     }
-                    Log.d("TelemetryService", "Subscribed to WHOOP Heart Rate GATT notifications.")
                 }
             }
         }
@@ -201,16 +239,33 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
             } else {
                 ((value[2].toInt() and 0xFF) shl 8) or (value[1].toInt() and 0xFF)
             }
-            if (hr in 40..220) {
+            if (hr in 35..230) {
                 liveHeartRate = hr
                 isWhoopConnected = true
             }
         }
     }
 
-    private fun getGenuineHeartRate(): Int {
-        // Returns live WHOOP BLE pulse; returns 0 if disconnected
-        return if (isWhoopConnected) liveHeartRate else 0
+    @SuppressLint("MissingPermission")
+    private fun ensureObdConnected() {
+        if (obdManager.isConnected) return
+
+        try {
+            val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+            val adapter = bluetoothManager.adapter
+            if (adapter != null && adapter.isEnabled) {
+                val pairedDevices = adapter.bondedDevices
+                val obdDevice = pairedDevices.firstOrNull { device ->
+                    val name = device.name?.uppercase() ?: ""
+                    name.contains("OBD") || name.contains("ELM327") ||
+                    name.contains("V-LINK") || name.contains("VGATE") || 
+                    name.contains("OBDLINK") || name.contains("CAR_SCANNER")
+                }
+                if (obdDevice != null) {
+                    obdManager.connect(obdDevice)
+                }
+            }
+        } catch (e: Exception) {}
     }
 
     private fun startForegroundServiceNotification() {
@@ -226,7 +281,7 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("RoadSense Active")
-            .setContentText("Streaming real-time telemetry to inference engine...")
+            .setContentText("Streaming real-time telemetry...")
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
             .build()
@@ -241,46 +296,19 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
         wakeLock?.acquire()
     }
 
-    @SuppressLint("MissingPermission")
-    private fun connectToObdBluetooth() {
-        Thread {
-            try {
-                val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-                bluetoothAdapter = bluetoothManager.adapter
-
-                if (bluetoothAdapter != null && bluetoothAdapter!!.isEnabled) {
-                    val pairedDevices = bluetoothAdapter!!.bondedDevices
-
-                    val obdDevice = pairedDevices.firstOrNull { device ->
-                        val name = device.name?.uppercase() ?: ""
-                        name.contains("OBD") || name.contains("ELM327") ||
-                        name.contains("V-LINK") || name.contains("VGATE") || name.contains("OBDLINK")
-                    }
-
-                    if (obdDevice != null) {
-                        Log.d("TelemetryService", "Found target OBD hardware: ${obdDevice.name}. Connecting...")
-                        obdManager.connect(obdDevice)
-                    } else {
-                        Log.d("TelemetryService", "No OBD hardware adapter found in paired devices.")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e("TelemetryService", "Bluetooth OBD connection failed: ${e.message}")
-            }
-        }.start()
-    }
+    private var pollTick = 0
 
     private fun startStreamingLoop() {
-        isStreaming = true
         handler.post(object : Runnable {
             override fun run() {
                 if (!isStreaming) return
 
-                if (obdManager.isConnected) {
-                    Thread { obdManager.pollObdData() }.start()
+                pollTick++
+                if (pollTick % 6 == 0 && !isWhoopConnected) {
+                    ensureWhoopConnected()
                 }
 
-                val currentHr = getGenuineHeartRate()
+                val currentHr = if (isWhoopConnected) liveHeartRate else 0
 
                 val payload = JSONObject().apply {
                     put("lat", currentLat)
@@ -290,19 +318,19 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
                     put("accel_mag", accelMag)
                     put("gyro_mag", gyroMag)
                     put("obd_connected", obdManager.isConnected)
-                    put("speed", obdManager.speedKmh)
-                    put("vehicle_speed", obdManager.speedKmh)
-                    put("rpm", obdManager.rpm)
-                    put("engine_speed", obdManager.rpm)
-                    put("throttle", obdManager.throttle)
-                    put("load", obdManager.engineLoad)
+                    put("speed", if (obdManager.isConnected) obdManager.speedKmh else 0.0)
+                    put("vehicle_speed", if (obdManager.isConnected) obdManager.speedKmh else 0.0)
+                    put("rpm", if (obdManager.isConnected) obdManager.rpm else 0.0)
+                    put("engine_speed", if (obdManager.isConnected) obdManager.rpm else 0.0)
+                    put("throttle", if (obdManager.isConnected) obdManager.throttle else 0.0)
+                    put("load", if (obdManager.isConnected) obdManager.engineLoad else 0.0)
                     put("heart_rate", currentHr)
                     put("bpm", currentHr)
                     put("hr", currentHr)
                 }
 
                 sendTelemetryToLaptop(payload.toString())
-                handler.postDelayed(this, 500)
+                handler.postDelayed(this, 300)
             }
         })
     }
@@ -318,9 +346,7 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
                     .build()
 
                 httpClient.newCall(request).execute().close()
-            } catch (e: Exception) {
-                // Ignore transient network errors
-            }
+            } catch (e: Exception) {}
         }.start()
     }
 
@@ -341,9 +367,7 @@ class TelemetryService : Service(), SensorEventListener, LocationListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_STICKY
-    }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onBind(intent: Intent?): IBinder? = null
 
