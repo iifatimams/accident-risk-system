@@ -20,71 +20,115 @@ class ObdManager {
     @Volatile var engineLoad: Double = 0.0
     @Volatile var isConnected: Boolean = false
 
+    private val lock = Any()
+    private var lastValidSpeedTime = 0L
+    private var lastValidRpmTime = 0L
+    private val STALE_THRESHOLD_MS = 1500L
+
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice): Boolean {
-        return try {
-            socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-            socket?.connect()
-            inputStream = socket?.inputStream
-            outputStream = socket?.outputStream
+        synchronized(lock) {
+            disconnect()
+            return try {
+                val sock = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                sock.connect()
+                socket = sock
+                inputStream = sock.inputStream
+                outputStream = sock.outputStream
 
-            // Verify ELM327 response handshake
-            val echoResp = sendObdCommand("ATE0")
-            val resetResp = sendObdCommand("AT Z")
+                // Configuration handshake
+                sendObdCommand("ATZ")
+                Thread.sleep(150)
+                sendObdCommand("ATE0") // Echo off
+                sendObdCommand("ATL0") // Linefeeds off
+                sendObdCommand("ATS0") // Spaces off
+                sendObdCommand("ATSP0") // Auto protocol
 
-            if (echoResp.contains("OK") || resetResp.contains("ELM") || resetResp.contains("OK") || resetResp.contains("v")) {
-                sendObdCommand("ATL0")    // Turn off linefeeds
-                sendObdCommand("AT SP 0") // Auto-select vehicle OBD protocol
-                isConnected = true
-                Log.d("ObdManager", "ELM327 OBD hardware validated successfully.")
-                true
-            } else {
-                Log.e("ObdManager", "Connected device is not an ELM327 OBD adapter.")
+                val probe = sendObdCommand("0100")
+                if (probe.contains("4100") || probe.contains("41 00")) {
+                    isConnected = true
+                    val now = System.currentTimeMillis()
+                    lastValidSpeedTime = now
+                    lastValidRpmTime = now
+                    Log.d("ObdManager", "ELM327 OBD ECU validated successfully.")
+                    true
+                } else {
+                    Log.w("ObdManager", "ELM327 answered, but vehicle ECU did not: $probe")
+                    disconnect()
+                    false
+                }
+            } catch (e: Exception) {
+                Log.e("ObdManager", "OBD connect failed: ${e.message}")
                 disconnect()
                 false
             }
-        } catch (e: Exception) {
-            Log.e("ObdManager", "OBD connection failed: ${e.message}")
-            disconnect()
-            false
         }
     }
 
     fun pollObdData() {
-        if (!isConnected) return
+        synchronized(lock) {
+            if (!isConnected || socket == null) return
 
-        val speedResp = sendObdCommand("010D")
-        speedKmh = parseSpeed(speedResp)
+            val now = System.currentTimeMillis()
 
-        val rpmResp = sendObdCommand("010C")
-        rpm = parseRpm(rpmResp)
+            // 1. Poll Speed (010D)
+            val speedResp = sendObdCommand("010D")
+            val parsedSpeed = parseSpeed(speedResp)
+            if (parsedSpeed != null) {
+                speedKmh = parsedSpeed
+                lastValidSpeedTime = now
+            } else if (now - lastValidSpeedTime > STALE_THRESHOLD_MS) {
+                speedKmh = 0.0
+            }
 
-        val throttleResp = sendObdCommand("0111")
-        throttle = parseSingleBytePercent(throttleResp, "4111")
+            // 2. Poll RPM (010C)
+            val rpmResp = sendObdCommand("010C")
+            val parsedRpm = parseRpm(rpmResp)
+            if (parsedRpm != null) {
+                rpm = parsedRpm
+                lastValidRpmTime = now
+            } else if (now - lastValidRpmTime > STALE_THRESHOLD_MS) {
+                rpm = 0.0
+            }
 
-        val loadResp = sendObdCommand("0104")
-        engineLoad = parseSingleBytePercent(loadResp, "4104")
+            // 3. Poll Throttle (0111)
+            val throttleResp = sendObdCommand("0111")
+            val parsedThrottle = parseSingleBytePercent(throttleResp, "4111")
+            if (parsedThrottle != null) {
+                throttle = parsedThrottle
+            }
+
+            // 4. Poll Engine Load (0104)
+            val loadResp = sendObdCommand("0104")
+            val parsedLoad = parseSingleBytePercent(loadResp, "4104")
+            if (parsedLoad != null) {
+                engineLoad = parsedLoad
+            }
+        }
     }
 
     private fun sendObdCommand(command: String): String {
+        val out = outputStream ?: return ""
+        val input = inputStream ?: return ""
+
         return try {
-            outputStream?.write((command + "\r").toByteArray())
-            outputStream?.flush()
+            out.write((command + "\r").toByteArray())
+            out.flush()
 
             val sb = StringBuilder()
             val buffer = ByteArray(256)
             val startTime = System.currentTimeMillis()
 
-            while (System.currentTimeMillis() - startTime < 400) {
-                if (inputStream?.available() ?: 0 > 0) {
-                    val bytesRead = inputStream?.read(buffer) ?: 0
+            while (System.currentTimeMillis() - startTime < 350) {
+                if (input.available() > 0) {
+                    val bytesRead = input.read(buffer)
                     if (bytesRead > 0) {
                         val part = String(buffer, 0, bytesRead)
                         sb.append(part)
                         if (sb.contains(">")) break
                     }
                 } else {
-                    Thread.sleep(10)
+                    Thread.sleep(8)
                 }
             }
 
@@ -99,21 +143,23 @@ class ObdManager {
         }
     }
 
-    private fun parseSpeed(raw: String): Double {
+    private fun parseSpeed(raw: String): Double? {
+        if (raw.isEmpty()) return null
         return try {
             val idx = raw.indexOf("410D")
             if (idx != -1 && raw.length >= idx + 6) {
                 val hexValue = raw.substring(idx + 4, idx + 6)
                 hexValue.toInt(16).toDouble()
             } else {
-                speedKmh
+                null
             }
         } catch (e: Exception) {
-            speedKmh
+            null
         }
     }
 
-    private fun parseRpm(raw: String): Double {
+    private fun parseRpm(raw: String): Double? {
+        if (raw.isEmpty()) return null
         return try {
             val idx = raw.indexOf("410C")
             if (idx != -1 && raw.length >= idx + 8) {
@@ -122,35 +168,41 @@ class ObdManager {
                 val b = hexValue.substring(2, 4).toInt(16)
                 ((a * 256.0) + b) / 4.0
             } else {
-                rpm
+                null
             }
         } catch (e: Exception) {
-            rpm
+            null
         }
     }
 
-    private fun parseSingleBytePercent(raw: String, header: String): Double {
+    private fun parseSingleBytePercent(raw: String, header: String): Double? {
+        if (raw.isEmpty()) return null
         return try {
             val idx = raw.indexOf(header)
             if (idx != -1 && raw.length >= idx + header.length + 2) {
                 val hexValue = raw.substring(idx + header.length, idx + header.length + 2)
                 (hexValue.toInt(16) * 100.0) / 255.0
             } else {
-                0.0
+                null
             }
         } catch (e: Exception) {
-            0.0
+            null
         }
     }
 
     fun disconnect() {
-        try {
-            socket?.close()
-        } catch (e: Exception) {}
-        isConnected = false
-        speedKmh = 0.0
-        rpm = 0.0
-        throttle = 0.0
-        engineLoad = 0.0
+        synchronized(lock) {
+            try {
+                socket?.close()
+            } catch (e: Exception) {}
+            socket = null
+            inputStream = null
+            outputStream = null
+            isConnected = false
+            speedKmh = 0.0
+            rpm = 0.0
+            throttle = 0.0
+            engineLoad = 0.0
+        }
     }
 }
