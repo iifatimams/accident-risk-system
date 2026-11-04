@@ -108,23 +108,27 @@ def create_app(
             static_dir / "app" / "index.html", headers={"Cache-Control": "no-store"}
         )
 
-    def ingest_frame(frame: SensorFrame, direct_risk: float | None = None) -> PredictionResult | None:
+    def ingest_frame(frame: SensorFrame, direct_risk: float | None = None, class_label: str | None = None) -> PredictionResult | None:
         if not application.state.active:
             raise HTTPException(409, "Session is stopped; POST /session/start")
 
         try:
-            if frame.gps_latitude is not None and frame.gps_longitude is not None:
-                try:
-                    map_resolver.update_location(frame.gps_latitude, frame.gps_longitude)
-                    in_roundabout = map_resolver.is_in_roundabout()
-                    frame = frame.model_copy(update={"is_roundabout": in_roundabout})
-                except Exception:
-                    pass
-
-            buffer.push(frame)
             result = None
-            for pending in buffer:
-                result = engine.process(pending)
+            
+            # FIX: Only enforce strict time-ordering on physical iOS sensors.
+            # ML loopbacks bypass the strict time filter to prevent clock-drift crashes.
+            if frame.source != "ml_runner":
+                if frame.gps_latitude is not None and frame.gps_longitude is not None:
+                    try:
+                        map_resolver.update_location(frame.gps_latitude, frame.gps_longitude)
+                        in_roundabout = map_resolver.is_in_roundabout()
+                        frame = frame.model_copy(update={"is_roundabout": in_roundabout})
+                    except Exception:
+                        pass
+
+                buffer.push(frame)
+                for pending in buffer:
+                    result = engine.process(pending)
 
             active_sessions = [s for s in database.list_sessions(limit=50) if s.get("ended_at") is None]
             session = next((s for s in active_sessions if s["stream_id"] == frame.stream_id), None)
@@ -153,7 +157,8 @@ def create_app(
                 engine.latest[frame.stream_id] = prediction
 
             try:
-                recorder.observe(frame, prediction)
+                if prediction is not None:
+                    recorder.observe(frame, prediction)
             except Exception:
                 pass
 
@@ -184,9 +189,8 @@ def create_app(
                 direct_risk = float(body["fused_risk"]) / 100.0
 
             source_tag = body.get("source", "ios")
+            class_label = body.get("class_label")
 
-            # CRITICAL: If the frame came from iOS, mirror it to port 8003 for ML processing!
-            # If the frame came from terminal_multimodal/ml_runner, do not loop it back.
             if source_tag not in ("terminal_multimodal", "ml_runner"):
                 async_mirror_to_terminal(body)
 
@@ -210,7 +214,7 @@ def create_app(
                 accel_x=body.get("accel_x"),
                 gyro_z=body.get("gyro_z"),
             )
-            prediction = ingest_frame(frame, direct_risk=direct_risk)
+            prediction = ingest_frame(frame, direct_risk=direct_risk, class_label=class_label)
             return {
                 "status": "ok",
                 "stream_id": stream_id,
