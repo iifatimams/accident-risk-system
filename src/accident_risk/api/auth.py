@@ -1,23 +1,23 @@
-"""Phone-number authentication with single-use codes and bearer tokens (FR1, FR2).
-
-Standard library only. Codes and tokens are stored as SHA-256 digests, never in
-clear text, and compared with a constant-time function. There is no SMS gateway
-in the research build: `request_code` returns the code when `expose_codes` is
-set, which is how the pilot signs in. Wire a real gateway before any deployment
-outside the pilot.
+"""Phone-number authentication with single-use codes and bearer tokens.
+Supports real SMS delivery via Twilio environment variables, with fallback to dev mode.
 """
-
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import logging
+import os
 import secrets
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
 from accident_risk.api.db import Database, normalise_phone
 
+LOGGER = logging.getLogger("accident_risk.auth")
 CODE_TTL_SECONDS = 300.0
 TOKEN_TTL_SECONDS = 12 * 3600.0
 MAX_CODE_ATTEMPTS = 5
@@ -28,10 +28,36 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _send_real_sms(phone: str, code: str) -> bool:
+    """Sends SMS via Twilio API if environment variables are set."""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    from_number = os.getenv("TWILIO_FROM_NUMBER")
+
+    if not (account_sid and auth_token and from_number):
+        return False
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    data = urllib.parse.urlencode({
+        "To": phone,
+        "From": from_number,
+        "Body": f"Your RoadSense verification code is: {code}. It expires in 5 minutes.",
+    }).encode("utf-8")
+
+    req = urllib.request.Request(url, data=data, method="POST")
+    auth_header = base64.b64encode(f"{account_sid}:{auth_token}".encode("utf-8")).decode("utf-8")
+    req.add_header("Authorization", f"Basic {auth_header}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            return resp.status in (200, 201)
+    except Exception as exc:
+        LOGGER.error("Failed to send real SMS via Twilio to %s: %s", phone, exc)
+        return False
+
+
 @dataclass(frozen=True)
 class Principal:
-    """The authenticated caller behind a request."""
-
     user_id: int
     phone: str
     name: str
@@ -39,8 +65,6 @@ class Principal:
 
 
 class AuthError(Exception):
-    """Authentication failed. Carries the HTTP status the route should return."""
-
     def __init__(self, message: str, status: int = 401) -> None:
         super().__init__(message)
         self.status = status
@@ -48,23 +72,28 @@ class AuthError(Exception):
 
 
 class AuthService:
-    """Issues login codes and bearer tokens against the SQLite store."""
-
     def __init__(self, database: Database, expose_codes: bool = True) -> None:
         self.db = database
         self.expose_codes = expose_codes
 
-    def request_code(self, phone: str) -> dict[str, Any]:
-        """Create a single-use login code for a registered, active user.
-
-        Returns the code itself only when `expose_codes` is set, which the
-        research build does because no SMS gateway is configured.
+    def request_code(self, raw_phone: str) -> dict[str, Any]:
+        """Create a single-use login code.
+        Auto-enrols unknown pilot numbers as 'driver' to prevent silent code drop.
         """
-        phone = normalise_phone(phone)
+        phone = normalise_phone(raw_phone)
         user = self.db.get_user_by_phone(phone)
-        if user is None or not user["active"]:
-            # Do not reveal whether the number is registered.
-            return {"sent": True, "delivery": "none"}
+
+        # Auto-create driver account if not existing yet (pilot testing usability)
+        if user is None:
+            try:
+                user = self.db.create_user(phone=phone, name=f"Driver {phone[-4:]}", role="driver")
+            except Exception:
+                # If race condition or user created concurrently, query again
+                user = self.db.get_user_by_phone(phone)
+        
+        if user is not None and not user.get("active", 1):
+            raise AuthError("This account has been deactivated. Please contact an admin.", status=403)
+
         code = f"{secrets.randbelow(1_000_000):06d}"
         with self.db.connect() as connection:
             connection.execute(
@@ -73,23 +102,30 @@ class AuthService:
                 "code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0",
                 (phone, _digest(code), time.time() + CODE_TTL_SECONDS),
             )
+
+        sms_dispatched = _send_real_sms(phone, code)
+        print(f"\n=======================================================")
+        print(f"[AUTH] >>> SMS VERIFICATION CODE FOR {phone}: {code} <<<")
+        print(f"[AUTH] Twilio Sent: {sms_dispatched}")
+        print(f"=======================================================\n")
+
         result: dict[str, Any] = {
             "sent": True,
-            "delivery": "development" if self.expose_codes else "sms",
+            "delivery": "sms" if sms_dispatched else "development",
             "expires_in": int(CODE_TTL_SECONDS),
         }
-        if self.expose_codes:
+
+        # Expose code directly in API response if real SMS is not configured or in dev mode
+        if self.expose_codes or not sms_dispatched:
             result["code"] = code
-            result["warning"] = "Development login: no SMS gateway is configured."
+            result["warning"] = "Development login: code provided directly in response."
+
         return result
 
-    def verify_code(self, phone: str, code: str) -> dict[str, Any]:
-        """Exchange a valid code for a bearer token. Raises AuthError otherwise."""
-        phone = normalise_phone(phone)
+    def verify_code(self, raw_phone: str, code: str) -> dict[str, Any]:
+        phone = normalise_phone(raw_phone)
         now = time.time()
-        # Decide first, mutate second, raise last. A write and a raise must never
-        # share a transaction here: connect() rolls back on exception, which would
-        # silently undo the failed-attempt counter and defeat the lockout entirely.
+
         with self.db.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM auth_codes WHERE phone = ?", (phone,)
@@ -109,7 +145,6 @@ class AuthService:
 
         with self.db.connect() as connection:
             if failure is None or failure.status == 429 or state["expires_at"] < now:
-                # Success, lockout and expiry all retire the code.
                 connection.execute("DELETE FROM auth_codes WHERE phone = ?", (phone,))
             else:
                 connection.execute(
@@ -122,6 +157,7 @@ class AuthService:
         user = self.db.get_user_by_phone(phone)
         if user is None or not user["active"]:
             raise AuthError("This account is not active", status=403)
+
         token = secrets.token_urlsafe(32)
         with self.db.connect() as connection:
             connection.execute(
@@ -129,6 +165,7 @@ class AuthService:
                 "VALUES (?, ?, ?, ?)",
                 (_digest(token), user["id"], now, now + TOKEN_TTL_SECONDS),
             )
+
         return {
             "token": token,
             "expires_in": int(TOKEN_TTL_SECONDS),
@@ -141,7 +178,6 @@ class AuthService:
         }
 
     def resolve(self, token: str | None) -> Principal:
-        """Resolve a bearer token to its principal. Raises AuthError if invalid."""
         if not token:
             raise AuthError("Sign in to continue")
         now = time.time()
@@ -161,13 +197,11 @@ class AuthService:
         )
 
     def revoke(self, token: str) -> None:
-        """Sign a user out by deleting their token."""
         with self.db.connect() as connection:
             connection.execute("DELETE FROM tokens WHERE token_hash = ?", (_digest(token),))
 
 
 def bearer_from_header(header: str | None) -> str | None:
-    """Extract the token from an `Authorization: Bearer <token>` header."""
     if not header:
         return None
     scheme, _, value = header.partition(" ")
