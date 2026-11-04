@@ -1,0 +1,343 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		12B6442B040C25DAAC4F61D8 /* WhoopClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3FD78276CAC74B9BF729075 /* WhoopClient.swift */; };
+		31A5EFE48F7CEB8742DA52AB /* BackgroundCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6105DDE7FBFC679ABC34F27 /* BackgroundCaptureService.swift */; };
+		339290E3BAB84171F4963F70 /* Uploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2618A3749C6DF3CD570DA01 /* Uploader.swift */; };
+		5D45900377FD5998DEA551FB /* SensorFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49EF4C4D47ACBC095254FB62 /* SensorFrame.swift */; };
+		BD96DB5904E9872C3896357B /* ObdBleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A467DBCF058E04A56FC266CE /* ObdBleClient.swift */; };
+		CF3807068F21948BC2DFFC47 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA87CE96E00133D8BE1A265 /* ContentView.swift */; };
+		E23A9176625E3889C8EB7FC7 /* RoadSenseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BE8F30F4F9D5E9DE5DEA15F /* RoadSenseApp.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		08CDA071C7C9B47AA4B3C0EC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		49EF4C4D47ACBC095254FB62 /* SensorFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorFrame.swift; sourceTree = "<group>"; };
+		4AA87CE96E00133D8BE1A265 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		8BE8F30F4F9D5E9DE5DEA15F /* RoadSenseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoadSenseApp.swift; sourceTree = "<group>"; };
+		A467DBCF058E04A56FC266CE /* ObdBleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObdBleClient.swift; sourceTree = "<group>"; };
+		ABB4FC76367215D056FD96F7 /* RoadSense.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RoadSense.entitlements; sourceTree = "<group>"; };
+		B34C54271C1E05B4A1698093 /* RoadSense.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RoadSense.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D2618A3749C6DF3CD570DA01 /* Uploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Uploader.swift; sourceTree = "<group>"; };
+		D6105DDE7FBFC679ABC34F27 /* BackgroundCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundCaptureService.swift; sourceTree = "<group>"; };
+		F3FD78276CAC74B9BF729075 /* WhoopClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhoopClient.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		2978A2BD711881F8EAE2497E /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				49EF4C4D47ACBC095254FB62 /* SensorFrame.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		45F24042EA089E52C7EE8656 /* RoadSense */ = {
+			isa = PBXGroup;
+			children = (
+				08CDA071C7C9B47AA4B3C0EC /* Info.plist */,
+				ABB4FC76367215D056FD96F7 /* RoadSense.entitlements */,
+				B1D851A375213A59237AE593 /* App */,
+				2978A2BD711881F8EAE2497E /* Models */,
+				C018D8CE1835E84AA80BDBC1 /* Services */,
+			);
+			path = RoadSense;
+			sourceTree = "<group>";
+		};
+		4F49B45F5CA0A246AEB7C913 = {
+			isa = PBXGroup;
+			children = (
+				45F24042EA089E52C7EE8656 /* RoadSense */,
+				800A979E47180F6B74011D61 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		800A979E47180F6B74011D61 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B34C54271C1E05B4A1698093 /* RoadSense.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		B1D851A375213A59237AE593 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				4AA87CE96E00133D8BE1A265 /* ContentView.swift */,
+				8BE8F30F4F9D5E9DE5DEA15F /* RoadSenseApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		C018D8CE1835E84AA80BDBC1 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				D6105DDE7FBFC679ABC34F27 /* BackgroundCaptureService.swift */,
+				A467DBCF058E04A56FC266CE /* ObdBleClient.swift */,
+				D2618A3749C6DF3CD570DA01 /* Uploader.swift */,
+				F3FD78276CAC74B9BF729075 /* WhoopClient.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		CE16A8A31CC3E544C0C83089 /* RoadSense */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 727A9D83CED7A82EB80520D1 /* Build configuration list for PBXNativeTarget "RoadSense" */;
+			buildPhases = (
+				EB1CD8D34469E4CE6B916C9D /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RoadSense;
+			packageProductDependencies = (
+			);
+			productName = RoadSense;
+			productReference = B34C54271C1E05B4A1698093 /* RoadSense.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		97B921402ACE992B40C93B0E /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					CE16A8A31CC3E544C0C83089 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = FE902F943AC797BA656D7368 /* Build configuration list for PBXProject "RoadSense" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 4F49B45F5CA0A246AEB7C913;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 800A979E47180F6B74011D61 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CE16A8A31CC3E544C0C83089 /* RoadSense */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		EB1CD8D34469E4CE6B916C9D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				31A5EFE48F7CEB8742DA52AB /* BackgroundCaptureService.swift in Sources */,
+				CF3807068F21948BC2DFFC47 /* ContentView.swift in Sources */,
+				BD96DB5904E9872C3896357B /* ObdBleClient.swift in Sources */,
+				E23A9176625E3889C8EB7FC7 /* RoadSenseApp.swift in Sources */,
+				5D45900377FD5998DEA551FB /* SensorFrame.swift in Sources */,
+				339290E3BAB84171F4963F70 /* Uploader.swift in Sources */,
+				12B6442B040C25DAAC4F61D8 /* WhoopClient.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		0BA29A83851758006AC7F7A9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		13144E4BBB0FE29E673F7B4B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		1E1E16E46E6AB61E3C6C47DD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = RoadSense/RoadSense.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 233WPK8SN4;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RoadSense/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ae.aus.roadsense.fatima;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		39FF13DC3C6089C94EE51BF1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = RoadSense/RoadSense.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 233WPK8SN4;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RoadSense/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ae.aus.roadsense.fatima;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		727A9D83CED7A82EB80520D1 /* Build configuration list for PBXNativeTarget "RoadSense" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				39FF13DC3C6089C94EE51BF1 /* Debug */,
+				1E1E16E46E6AB61E3C6C47DD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FE902F943AC797BA656D7368 /* Build configuration list for PBXProject "RoadSense" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				13144E4BBB0FE29E673F7B4B /* Debug */,
+				0BA29A83851758006AC7F7A9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 97B921402ACE992B40C93B0E /* Project object */;
+}

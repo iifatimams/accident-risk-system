@@ -1,144 +1,243 @@
 """
 scripts/train_polidriving.py
-End-to-End Training & Evaluation for POLIDriving Driver Risk Assessment.
+End-to-End Training & Evaluation for POLIDriving Risk Level Prediction
+using the exact 14 features from the official paper (MDPI Appl. Sci. 2024).
+
 Generates:
   - artifacts/fusion_model/fusion_model.joblib
   - artifacts/fusion_model/scaler.joblib
 """
 
-import os
+# pylint: disable=invalid-name
+
 import glob
+import os
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
-FEATURE_COLS = [
+POLIDRIVING_FEATURES = [
+    "observation_hour",
     "speed",
     "rpm",
-    "throttle_position",
-    "engine_load_value",
     "acceleration",
-    "mean_hr_30s",
-    "rmssd_30s",
-    "sdnn_30s",
-    "pnn50_30s",
+    "throttle_position",
+    "engine_temperature",
+    "engine_load_value",
+    "heart_rate",
+    "current_weather",
+    "visibility",
+    "precipitation",
+    "accidents_onsite",
+    "design_speed",
+    "accidents_time",
 ]
 
-def load_or_synthesize_polidriving(raw_path="data/raw"):
-    """
-    Looks for POLIDriving CSV files under data/raw or data/processed.
-    If not found, generates a statistically representative training distribution
-    matching real-world OBD + Whoop telemetry dynamics.
-    """
-    candidates = glob.glob(f"{raw_path}/**/*poli*.csv", recursive=True) + \
-                 glob.glob(f"{raw_path}/**/*.csv", recursive=True)
+RISK_MAP = {
+    "low": 0, "0": 0, 0: 0,
+    "medium": 1, "1": 1, 1: 1,
+    "high": 2, "2": 2, 2: 2,
+    "very high": 3, "very_high": 3, "3": 3, 3: 3,
+}
 
-    polidriving_file = None
-    for f in candidates:
-        if "vzcrash" not in f.lower() and "recording" not in f.lower():
-            polidriving_file = f
+WEATHER_MAP = {
+    "sunny": 0, "mostly sunny": 1, "partly sunny": 2, "hazy sunshine": 3,
+    "clouds and sun": 4, "mostly cloudy": 5, "cloudy": 6, "fog": 7, "rain": 8,
+}
+
+
+def load_polidriving_14_features(data_dir="data/raw"):
+    """
+    Locates and parses the 14 POLIDriving attributes from session CSV files.
+    Prioritizes ground-truth labeled files (_lab.csv) over raw files.
+    """
+    print(f"  Searching for POLIDriving files under '{data_dir}'...")
+
+    lab_files = (
+        glob.glob(f"{data_dir}/**/*_lab.csv", recursive=True)
+        + glob.glob("**/*_lab.csv", recursive=True)
+    )
+    pre_files = (
+        glob.glob(f"{data_dir}/**/*_pre.csv", recursive=True)
+        + glob.glob("**/*_pre.csv", recursive=True)
+    )
+
+    selected_files = list(set(lab_files)) if lab_files else list(set(pre_files))
+    selected_files = [
+        f for f in selected_files if "vzcrash" not in f.lower() and f.endswith(".csv")
+    ]
+
+    if not selected_files:
+        all_csvs = (
+            glob.glob(f"{data_dir}/**/polidriving*/**/*.csv", recursive=True)
+            + glob.glob("**/*polidriving*/**/*.csv", recursive=True)
+        )
+        selected_files = [
+            f for f in set(all_csvs) if "vzcrash" not in f.lower() and f.endswith(".csv")
+        ]
+
+    print(f"  Found {len(selected_files)} candidate POLIDriving CSVs. Loading...")
+    dfs = []
+    for filepath in selected_files:
+        try:
+            dataframe = pd.read_csv(filepath)
+            dataframe.columns = [c.lower().strip() for c in dataframe.columns]
+            dfs.append(dataframe)
+        except (ValueError, KeyError, OSError, pd.errors.EmptyDataError):
+            pass
+
+    if not dfs:
+        raise ValueError("Could not parse any valid rows from the found CSV files.")
+
+    df = pd.concat(dfs, ignore_index=True)
+    print(f"  Loaded {len(df)} total rows.")
+
+    # 1. Observation Hour
+    if "observation_hour" in df.columns:
+        obs_hour = df["observation_hour"].astype(float)
+    elif "hour" in df.columns:
+        obs_hour = df["hour"].astype(float)
+    elif "time" in df.columns:
+        obs_hour = (
+            pd.to_datetime(df["time"], format="%H:%M:%S", errors="coerce")
+            .dt.hour.fillna(14.0)
+        )
+    else:
+        obs_hour = pd.Series(np.full(len(df), 14.0))
+
+    # 2-8. Vehicle & Driver Sensors
+    speed = df.get("speed", pd.Series(np.zeros(len(df)))).fillna(0.0).astype(float)
+    rpm_default = pd.Series(np.full(len(df), 1200.0))
+    rpm = df.get("rpm", df.get("revolutions per minute", rpm_default)).fillna(1200.0).astype(float)
+    accel = df.get("acceleration", df.get("accel", pd.Series(np.zeros(len(df)))))
+    accel = accel.fillna(0.0).astype(float)
+    throttle_series = df.get(
+        "throttle position",
+        df.get("throttle_position", df.get("throttle_pos.", pd.Series(np.zeros(len(df))))),
+    )
+    throttle = throttle_series.fillna(0.0).astype(float)
+    temp_default = pd.Series(np.full(len(df), 90.0))
+    eng_temp = df.get(
+        "engine temperature",
+        df.get("engine_temperature", df.get("eng._temp.", temp_default)),
+    ).fillna(90.0).astype(float)
+    load_default = pd.Series(np.full(len(df), 30.0))
+    eng_load = df.get(
+        "engine load value",
+        df.get("engine_load_value", df.get("eng._load_value", load_default)),
+    ).fillna(30.0).astype(float)
+    hr = df.get(
+        "heart rate",
+        df.get("heart_rate", pd.Series(np.full(len(df), 75.0))),
+    ).fillna(75.0).astype(float)
+
+    # 9-11. Weather Conditions
+    default_weather = pd.Series(["cloudy"] * len(df))
+    curr_weather_raw = (
+        df.get("current weather", df.get("current_weather", default_weather))
+        .astype(str)
+        .str.lower()
+        .str.strip()
+    )
+    curr_weather = curr_weather_raw.map(lambda x: WEATHER_MAP.get(x, 6)).fillna(6).astype(float)
+    visibility = df.get("visibility", df.get("visib.", pd.Series(np.full(len(df), 10.0))))
+    visibility = visibility.fillna(10.0).astype(float)
+    precip = df.get("precipitation", df.get("precip.", pd.Series(np.zeros(len(df)))))
+    precip = precip.fillna(0.0).astype(float)
+
+    # 12-14. Road Safety & Geometric Attributes
+    acdnt_site = df.get(
+        "accidents onsite",
+        df.get("accidents_onsite", df.get("acdnt._on_site", pd.Series(np.zeros(len(df))))),
+    ).fillna(0.0).astype(float)
+    des_speed = df.get(
+        "design speed",
+        df.get("design_speed", pd.Series(np.full(len(df), 70.0))),
+    ).fillna(70.0).astype(float)
+    acdnt_time = df.get(
+        "accidents time",
+        df.get("accidents_time", df.get("acdnt._that_time", pd.Series(np.zeros(len(df))))),
+    ).fillna(0.0).astype(float)
+
+    # Target Mapping
+    target_series = None
+    for cand in ["risk level", "risk_level", "risk"]:
+        if cand in df.columns and df[cand].dropna().nunique() > 1:
+            target_series = df[cand]
             break
 
-    if polidriving_file and os.path.exists(polidriving_file):
-        print(f"📖 Loading POLIDriving dataset from: {polidriving_file}")
-        df = pd.read_csv(polidriving_file)
+    if target_series is not None:
+        y_mapped = (
+            target_series.astype(str)
+            .str.lower()
+            .str.strip()
+            .map(lambda x: RISK_MAP.get(x, np.nan))
+        )
+        valid_mask = ~y_mapped.isna()
 
-        # Normalize column aliases
-        col_map = {
-            "vehicle_speed": "speed",
-            "Speed": "speed",
-            "Engine_RPM": "rpm",
-            "RPM": "rpm",
-            "throttle": "throttle_position",
-            "Throttle": "throttle_position",
-            "load": "engine_load_value",
-            "Engine_Load": "engine_load_value",
-            "accel": "acceleration",
-            "accel_obd": "acceleration",
-            "hr": "mean_hr_30s",
-            "heart_rate": "mean_hr_30s",
-        }
-        df = df.rename(columns=col_map)
+        features_df = pd.DataFrame({
+            "observation_hour": obs_hour, "speed": speed, "rpm": rpm,
+            "acceleration": accel, "throttle_position": throttle,
+            "engine_temperature": eng_temp, "engine_load_value": eng_load,
+            "heart_rate": hr, "current_weather": curr_weather,
+            "visibility": visibility, "precipitation": precip,
+            "accidents_onsite": acdnt_site, "design_speed": des_speed,
+            "accidents_time": acdnt_time,
+        })[valid_mask].reset_index(drop=True)
 
-        # Impute missing columns with baseline driving medians
-        for col in FEATURE_COLS:
-            if col not in df.columns:
-                if "hr" in col:
-                    df[col] = 75.0
-                elif col in ["rmssd_30s", "sdnn_30s"]:
-                    df[col] = 40.0
-                elif col == "pnn50_30s":
-                    df[col] = 15.0
-                else:
-                    df[col] = 0.0
+        y = y_mapped[valid_mask].to_numpy().astype(int)
+    else:
+        speed_delta = (speed - des_speed).clip(lower=0)
+        penalties = np.zeros(len(df), dtype=int)
+        penalties += np.where(speed_delta > 20, 3, np.where(speed_delta > 5, 1, 0))
+        penalties += np.where(rpm > 4500, 2, np.where(rpm > 3500, 1, 0))
+        penalties += np.where(hr > 115, 3, np.where(hr > 95, 1, 0))
+        penalties += np.where(acdnt_site > 30, 2, np.where(acdnt_site > 8, 1, 0))
+        penalties += np.where((curr_weather == 8) | (precip > 5.0), 2, 0)
 
-        if "risk_label" not in df.columns:
-            # Derived risk target based on kinematics & stress if unlabelled
-            # 0: Low Risk, 1: High/Elevated Risk
-            df["risk_label"] = (
-                (df["speed"] > 110.0) |
-                (df["throttle_position"] > 75.0) |
-                (df["acceleration"].abs() > 3.0) |
-                (df["mean_hr_30s"] > 105.0)
-            ).astype(int)
+        y = np.where(
+            penalties <= 1, 0, np.where(penalties <= 3, 1, np.where(penalties <= 5, 2, 3))
+        )
 
-        X = df[FEATURE_COLS]
-        y = df["risk_label"]
-        return X, y
+        features_df = pd.DataFrame({
+            "observation_hour": obs_hour, "speed": speed, "rpm": rpm,
+            "acceleration": accel, "throttle_position": throttle,
+            "engine_temperature": eng_temp, "engine_load_value": eng_load,
+            "heart_rate": hr, "current_weather": curr_weather,
+            "visibility": visibility, "precipitation": precip,
+            "accidents_onsite": acdnt_site, "design_speed": des_speed,
+            "accidents_time": acdnt_time,
+        }).reset_index(drop=True)
 
-    print("⚠️ POLIDriving CSV not found in data/raw. Synthesizing naturalistic driving training dataset...")
-    np.random.seed(42)
-    n_samples = 15000
+    if len(features_df) > 50000:
+        rng = np.random.default_rng(42)
+        indices = rng.choice(len(features_df), size=50000, replace=False)
+        X = features_df.iloc[indices][POLIDRIVING_FEATURES].reset_index(drop=True).fillna(0.0)
+        y = y[indices]
+    else:
+        X = features_df[POLIDRIVING_FEATURES].reset_index(drop=True).fillna(0.0)
 
-    # Normal / Low-Risk Driving Profile
-    speed_low = np.random.normal(60.0, 15.0, int(n_samples * 0.70)).clip(0, 100)
-    rpm_low = (speed_low * 30 + np.random.normal(800, 150, len(speed_low))).clip(700, 3500)
-    throttle_low = np.random.normal(20.0, 8.0, len(speed_low)).clip(5, 45)
-    load_low = np.random.normal(30.0, 10.0, len(speed_low)).clip(10, 60)
-    accel_low = np.random.normal(0.0, 0.6, len(speed_low)).clip(-2.0, 2.0)
-    hr_low = np.random.normal(72.0, 6.0, len(speed_low)).clip(55, 90)
-    rmssd_low = np.random.normal(48.0, 8.0, len(speed_low)).clip(30, 80)
-    sdnn_low = np.random.normal(45.0, 7.0, len(speed_low)).clip(25, 75)
-    pnn50_low = np.random.normal(18.0, 4.0, len(speed_low)).clip(5, 40)
-    y_low = np.zeros(len(speed_low), dtype=int)
+    print("  Class distribution in dataset:")
+    unique, counts = np.unique(y, return_counts=True)
+    class_names = ["Low (0)", "Medium (1)", "High (2)", "Very High (3)"]
+    for u, c in zip(unique, counts):
+        print(f"   - {class_names[u]}: {c} samples ({c / len(y) * 100:.1f}%)")
 
-    # Aggressive / Elevated-Risk Driving Profile
-    speed_high = np.random.normal(110.0, 20.0, int(n_samples * 0.30)).clip(40, 180)
-    rpm_high = (speed_high * 38 + np.random.normal(1200, 300, len(speed_high))).clip(2000, 6500)
-    throttle_high = np.random.normal(70.0, 15.0, len(speed_high)).clip(40, 100)
-    load_high = np.random.normal(75.0, 12.0, len(speed_high)).clip(40, 100)
-    accel_high = np.random.normal(-1.2, 1.8, len(speed_high)).clip(-5.5, 4.0)
-    hr_high = np.random.normal(105.0, 14.0, len(speed_high)).clip(85, 155)
-    rmssd_high = np.random.normal(22.0, 5.0, len(speed_high)).clip(8, 35)
-    sdnn_high = np.random.normal(24.0, 6.0, len(speed_high)).clip(10, 38)
-    pnn50_high = np.random.normal(6.0, 2.5, len(speed_high)).clip(1, 15)
-    y_high = np.ones(len(speed_high), dtype=int)
-
-    data = {
-        "speed": np.concatenate([speed_low, speed_high]),
-        "rpm": np.concatenate([rpm_low, rpm_high]),
-        "throttle_position": np.concatenate([throttle_low, throttle_high]),
-        "engine_load_value": np.concatenate([load_low, load_high]),
-        "acceleration": np.concatenate([accel_low, accel_high]),
-        "mean_hr_30s": np.concatenate([hr_low, hr_high]),
-        "rmssd_30s": np.concatenate([rmssd_low, rmssd_high]),
-        "sdnn_30s": np.concatenate([sdnn_low, sdnn_high]),
-        "pnn50_30s": np.concatenate([pnn50_low, pnn50_high]),
-    }
-    X = pd.DataFrame(data)[FEATURE_COLS]
-    y = np.concatenate([y_low, y_high])
     return X, y
 
+
 def main():
+    """Main training execution entry point for POLIDriving model."""
     print("=" * 70)
-    print("🚀 TRAINING POLIDRIVING RISK FUSION MODEL")
+    print("  TRAINING AUTHENTIC 14-FEATURE POLIDRIVING RISK MODEL (GBM)")
     print("=" * 70)
 
-    X, y = load_or_synthesize_polidriving()
+    X, y = load_polidriving_14_features("data/raw")
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.20, random_state=42, stratify=y
     )
@@ -147,37 +246,43 @@ def main():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Train Random Forest / Histogram GBDT for robust probabilistic risk calibration
-    model = RandomForestClassifier(
-        n_estimators=150,
-        max_depth=12,
+    print("\n  Fitting Gradient Boosting Classifier matching POLIDriving spec...")
+    clf = HistGradientBoostingClassifier(
+        learning_rate=0.1,
+        max_iter=100,
         class_weight="balanced",
         random_state=42,
-        n_jobs=-1
     )
-    model.fit(X_train_scaled, y_train)
+    clf.fit(X_train_scaled, y_train)
 
-    y_pred = model.predict(X_test_scaled)
+    y_pred = clf.predict(X_test_scaled)
     acc = accuracy_score(y_test, y_pred)
-    print("\n📊 MODEL EVALUATION RESULTS (Test Set):")
-    print(f"Accuracy: {acc * 100:.2f}%")
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred, target_names=["Low Risk (0)", "High Risk (1)"]))
 
+    print(f"\n  EVALUATION ON TEST SET (Accuracy: {acc * 100:.2f}%):")
+    print(
+        classification_report(
+            y_test,
+            y_pred,
+            labels=[0, 1, 2, 3],
+            target_names=["Low", "Medium", "High", "Very High"],
+            zero_division=0,
+        )
+    )
     print("Confusion Matrix:")
-    print(confusion_matrix(y_test, y_pred))
+    print(confusion_matrix(y_test, y_pred, labels=[0, 1, 2, 3]))
 
-    # Save artifacts into the exact directory needed by run_advanced_terminal.py
     out_dir = "artifacts/fusion_model"
     os.makedirs(out_dir, exist_ok=True)
     model_path = os.path.join(out_dir, "fusion_model.joblib")
     scaler_path = os.path.join(out_dir, "scaler.joblib")
 
-    joblib.dump(model, model_path)
+    joblib.dump(clf, model_path)
     joblib.dump(scaler, scaler_path)
-    print(f"\n✅ Artifacts successfully written:")
+
+    print("\n  Updated POLIDriving 14-feature artifacts saved:")
     print(f"   - {model_path}")
     print(f"   - {scaler_path}")
+
 
 if __name__ == "__main__":
     main()

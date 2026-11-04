@@ -1,8 +1,4 @@
-"""Product API behind the operator and driver interface.
-
-Mounted at ``/app/api`` alongside research ingestion endpoints.
-"""
-
+"""Product API behind the operator and driver interface. Mounted at /app/api."""
 import time
 from typing import Annotated, Any
 from uuid import uuid4
@@ -19,11 +15,11 @@ SESSION_TIMEOUT_SECONDS = 180.0
 
 
 class CodeRequest(BaseModel):
-    phone: str = Field(min_length=5, max_length=20)
+    phone: str = Field(min_length=3, max_length=30)
 
 
 class VerifyRequest(BaseModel):
-    phone: str = Field(min_length=5, max_length=20)
+    phone: str = Field(min_length=3, max_length=30)
     code: str = Field(min_length=4, max_length=10)
 
 
@@ -38,14 +34,14 @@ class CollisionRequest(BaseModel):
 
 
 class DriverRequest(BaseModel):
-    phone: str = Field(min_length=5, max_length=20)
+    phone: str = Field(min_length=3, max_length=30)
     name: str = Field(min_length=1, max_length=120)
     adapter_id: int | None = None
     wearable_id: int | None = None
 
 
 class UserRequest(BaseModel):
-    phone: str = Field(min_length=5, max_length=20)
+    phone: str = Field(min_length=3, max_length=30)
     name: str = Field(min_length=1, max_length=120)
     role: str
 
@@ -128,6 +124,8 @@ def create_router(
     def request_code(payload: CodeRequest) -> dict[str, Any]:
         try:
             return auth.request_code(payload.phone)
+        except AuthError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -165,12 +163,10 @@ def create_router(
         thresholds = database.get_settings()
         snapshot: dict[str, Any] = {}
         ages: dict[str, float] = {}
-
         now = time.time()
         synchronizer = engine.pipeline.synchronizer
-
-        stream_id = session["stream_id"] if session is not None else "hardware"
-
+        stream_id = session["stream_id"] if session is not None else f"u{principal.user_id}-default"
+        
         if stream_id in synchronizer.values and any(synchronizer.snapshot(stream_id, now).model_dump().values()):
             snapshot = synchronizer.snapshot(stream_id, now).model_dump()
             ages = synchronizer.ages(stream_id, now)
@@ -220,9 +216,13 @@ def create_router(
 
     @router.post("/driver/session/start")
     def start_session(payload: StartSessionRequest, principal: Principal = any_user) -> dict[str, Any]:
-        if database.active_session(principal.user_id) is not None:
-            raise HTTPException(409, "A session is already running")
-        stream_id = payload.stream_id or f"u{principal.user_id}-{uuid4().hex[:12]}"
+        existing = database.active_session(principal.user_id)
+        if existing is not None:
+            # Idempotently return the running session rather than failing
+            recorder.register(existing["stream_id"], existing["id"])
+            return existing
+
+        stream_id = payload.stream_id or f"u{principal.user_id}-{uuid4().hex[:8]}"
         try:
             session = database.start_session(principal.user_id, stream_id)
         except ValueError as exc:
@@ -234,7 +234,7 @@ def create_router(
     def stop_session(principal: Principal = any_user) -> dict[str, Any]:
         session = database.active_session(principal.user_id)
         if session is None:
-            raise HTTPException(404, "No session is running")
+            return {"status": "no_active_session"}
         summary = recorder.finish(session["id"], session["stream_id"], "driver_stopped")
         return {"session": database.get_session(session["id"]), "summary": summary}
 
@@ -308,7 +308,6 @@ def create_router(
                 fields = synchronizer.snapshot(stream_id, now).model_dump()
             elif "hardware" in synchronizer.values:
                 fields = synchronizer.snapshot("hardware", now).model_dump()
-
             prediction = engine.latest.get(stream_id) or engine.latest.get("hardware")
             index = prediction.overall_risk_index if prediction else None
             drivers.append(
