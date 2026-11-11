@@ -234,7 +234,7 @@ public class PermissionTriggerManager: NSObject, ObservableObject, CLLocationMan
 // MARK: - Login View
 public struct LoginView: View {
     @ObservedObject var auth = AuthManager.shared
-    @State private var phoneNumber = "+971508151511"
+    @AppStorage("saved_driver_phone") private var phoneNumber = ""
     @State private var verificationCode = ""
     @FocusState private var isFieldFocused: Bool
     

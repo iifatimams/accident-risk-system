@@ -1,8 +1,8 @@
-"""Real-time multimodal terminal runner with proactive context-aware risk logic."""
+"""Real-time multimodal terminal runner with weather risk scaling, proactive prediction, turn suppression, and sub-second latency."""
+import asyncio
 from collections import deque
 import csv
 import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import math
 import os
@@ -10,11 +10,13 @@ import sys
 import threading
 import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import joblib
 import numpy as np
 import pandas as pd
 
 from accident_risk.processing.map_context import MapContextResolver
+from accident_risk.processing.weather_context import WeatherContextResolver
 
 # =========================================================
 # PATH & MODEL CONFIGURATION
@@ -25,9 +27,12 @@ BENCHMARK_MODEL_PATH = "artifacts/benchmark_models/vzcrash_xgb.joblib"
 ANOMALY_MODEL_PATH = "artifacts/benchmark_models/unsupervised_iso.joblib"
 BENCHMARK_SCALER_PATH = "artifacts/benchmark_models/benchmark_scaler.joblib"
 
+# Set your OpenWeatherMap API Key here or pass via OPENWEATHER_API_KEY environment variable
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "YOUR_OPENWEATHER_API_KEY_HERE")
+
 CLASS_MAP = {0: "CRASH (Class 0)", 1: "NEAR-MISS (Class 1)", 2: "NORMAL (Class 2)"}
 SERVE_INGEST_URL = "http://127.0.0.1:8000/api/v1/ingest"
-HARDWARE_TIMEOUT_SEC = 10.0
+HARDWARE_TIMEOUT_SEC = 5.0
 
 POLIDRIVING_FEATURES = [
     "observation_hour", "speed", "rpm", "acceleration", "throttle_position",
@@ -36,67 +41,48 @@ POLIDRIVING_FEATURES = [
 ]
 
 state_lock = threading.Lock()
+live_state = {
+    "stream_id": "driver-default",
+    "lat": 0.0,
+    "lon": 0.0,
+    "accel_mag": 9.8,
+    "gyro_mag": 0.0,
+    "last_android_time": 0.0,
+    "instant_hr": 72.0,
+    "mean_hr_30s": 72.0,
+    "rmssd_30s": 45.0,
+    "sdnn_30s": 40.0,
+    "pnn50_30s": 15.0,
+    "last_whoop_time": 0.0,
+    "speed": 0.0,
+    "rpm": 0.0,
+    "throttle": 0.0,
+    "load": 0.0,
+    "accel_obd": 0.0,
+    "last_obd_time": 0.0,
+    
+    # CV State
+    "eyes_on_road": True,
+    "eyes_closed_sec": 0.0,
+    "traffic_level": "empty",
+    "lead_closing_fast": False,
+}
 
+history_buffer = deque(maxlen=30)
 
-class DriverContext:
-    def __init__(self, stream_id: str):
-        self.stream_id = stream_id
-        self.lat = 0.0
-        self.lon = 0.0
-        self.accel_mag = 0.0
-        self.gyro_mag = 0.0
-        self.speed = 0.0
-        self.rpm = 0.0
-        self.throttle = 0.0
-        self.load = 0.0
-        self.instant_hr = 0.0
-        self.accel_obd = 0.0
-
-        # --- New Context Variables ---
-        self.resting_hr = None  # Will auto-calibrate on first connection
-        self.eyes_on_road = True
-        self.lead_closing_fast = False
-
-        self.last_stream_time = 0.0
-        self.last_obd_time = 0.0
-        self.last_whoop_time = 0.0
-
-        self.obd_connected = False
-        self.whoop_connected = False
-
-        self.prev_speed_mps = None
-        self.prev_time = None
-        self.smoothed_accel = 0.0
-        self.smoothed_fused_risk = 0.0
-
-        self.history_buffer = deque(maxlen=30)
-
-
-drivers: dict[str, DriverContext] = {}
-
-
-def get_driver(stream_id: str) -> DriverContext:
-    if stream_id not in drivers:
-        drivers[stream_id] = DriverContext(stream_id)
-    return drivers[stream_id]
-
-
-def async_forward_to_dashboard(payload: dict):
-    """Pushes calculated ML metrics directly to the FastAPI server."""
+def async_forward_to_dashboard(payload):
     def send():
         try:
-            data_bytes = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(
                 SERVE_INGEST_URL,
-                data=data_bytes,
+                data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=1.0):
+            with urllib.request.urlopen(req, timeout=0.2):
                 pass
-        except (urllib.error.URLError, TimeoutError, OSError):
+        except Exception:
             pass
     threading.Thread(target=send, daemon=True).start()
-
 
 class UnifiedIngestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -110,288 +96,311 @@ class UnifiedIngestHandler(BaseHTTPRequestHandler):
                 for frame in frames:
                     if not isinstance(frame, dict):
                         continue
-                    sid = str(frame.get("stream_id") or "driver-default")
-                    driver = get_driver(sid)
-                    driver.last_stream_time = now
-
-                    # Parse standard sensors
-                    lat = frame.get("lat") or frame.get("gps_latitude")
-                    lon = frame.get("lon") or frame.get("gps_longitude")
+                    live_state["last_android_time"] = now
+                    
+                    live_state["stream_id"] = str(frame.get("stream_id") or "driver-default")
+                    
+                    lat = frame.get("lat") or frame.get("latitude") or frame.get("gps_latitude")
+                    lon = frame.get("lon") or frame.get("longitude") or frame.get("gps_longitude")
                     if lat is not None and lon is not None:
-                        driver.lat = float(lat)
-                        driver.lon = float(lon)
-
-                    if "accel_mag" in frame:
-                        driver.accel_mag = float(frame["accel_mag"])
-                    if "gyro_mag" in frame:
-                        driver.gyro_mag = float(frame["gyro_mag"])
-
-                    obd_conn = bool(frame.get("obd_connected") or frame.get("is_obd_connected"))
-                    driver.obd_connected = obd_conn
-
-                    driver.speed = float(frame.get("speed") or frame.get("vehicle_speed") or 0.0)
-                    driver.rpm = float(frame.get("rpm") or frame.get("engine_speed") or 0.0)
-                    driver.throttle = float(frame.get("throttle") or frame.get("throttle_position") or 0.0)
-                    driver.load = float(frame.get("load") or frame.get("engine_load") or 0.0)
-
-                    if obd_conn or driver.speed > 0 or driver.rpm > 0:
-                        driver.last_obd_time = now
-
-                    hr_raw = float(frame.get("heart_rate") or frame.get("bpm") or frame.get("hr") or 0.0)
-                    if hr_raw > 0:
-                        driver.instant_hr = hr_raw
-                        driver.whoop_connected = True
-                        driver.last_whoop_time = now
+                        live_state["lat"] = float(lat)
+                        live_state["lon"] = float(lon)
                         
-                        # Auto-calibrate resting HR to the first valid heart rate seen
-                        if driver.resting_hr is None:
-                            driver.resting_hr = hr_raw
-                    else:
-                        if (now - driver.last_whoop_time) > HARDWARE_TIMEOUT_SEC:
-                            driver.whoop_connected = False
-
-                    # Parse new Vision Camera Flags (Default to safe if not provided yet)
-                    driver.eyes_on_road = frame.get("eyes_on_road", True)
-                    driver.lead_closing_fast = frame.get("lead_closing_fast", False)
+                    ax = frame.get("accel_x", 0.0)
+                    ay = frame.get("accel_y", 0.0)
+                    az = frame.get("accel_z", 0.0)
+                    if ax or ay or az:
+                        live_state["accel_mag"] = math.sqrt(float(ax) ** 2 + float(ay) ** 2 + float(az) ** 2)
+                    elif "accel_mag" in frame:
+                        live_state["accel_mag"] = float(frame["accel_mag"])
+                        
+                    if "gyro_mag" in frame:
+                        live_state["gyro_mag"] = float(frame["gyro_mag"])
+                    elif "gyro_z" in frame:
+                        live_state["gyro_mag"] = float(frame["gyro_z"])
+                        
+                    is_obd_connected = frame.get("obd_connected", False)
+                    speed_val = frame.get("speed") or frame.get("vehicle_speed") or 0.0
+                    rpm_val = frame.get("rpm") or frame.get("engine_speed") or 0.0
+                    throttle_val = frame.get("throttle") or frame.get("throttle_position") or 0.0
+                    load_val = frame.get("load") or frame.get("engine_load") or 0.0
+                    
+                    if is_obd_connected or speed_val > 0 or rpm_val > 0:
+                        live_state["speed"] = float(speed_val)
+                        live_state["rpm"] = float(rpm_val)
+                        live_state["throttle"] = float(throttle_val)
+                        live_state["load"] = float(load_val)
+                        live_state["last_obd_time"] = now
+                        
+                    hr_val = frame.get("bpm") or frame.get("heart_rate") or frame.get("hr")
+                    if hr_val is not None:
+                        hr = float(hr_val)
+                        live_state["instant_hr"] = hr
+                        live_state["mean_hr_30s"] = hr
+                        live_state["last_whoop_time"] = now
+                        
+                    # FIX: Capture Computer Vision metrics sent from the iOS device
+                    if "eyes_on_road" in frame:
+                        live_state["eyes_on_road"] = frame["eyes_on_road"]
+                    if "eyes_closed_sec" in frame:
+                        live_state["eyes_closed_sec"] = float(frame["eyes_closed_sec"])
+                    if "traffic_level" in frame:
+                        live_state["traffic_level"] = str(frame["traffic_level"])
+                    if "lead_closing_fast" in frame:
+                        live_state["lead_closing_fast"] = frame["lead_closing_fast"]
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        except Exception:
             self.send_response(400)
             self.end_headers()
 
-    def log_message(self, fmt, *args):
+    def log_message(self, format, *args):
         pass
-
 
 def start_receiver():
     server = HTTPServer(("0.0.0.0", 8003), UnifiedIngestHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
 
+def compute_predictive_metrics(buf):
+    if len(buf) < 4:
+        return 0.0, 0.0
+    t_now = buf[-1]["time"]
+    t_past = buf[0]["time"]
+    dt = t_now - t_past
+    if dt <= 0.05:
+        return 0.0, 0.0
+    jerk = (buf[-1]["accel"] - buf[0]["accel"]) / dt
+    hr_velocity = (buf[-1]["hr"] - buf[0]["hr"]) / dt
+    return jerk, hr_velocity
 
 def main():
     if not os.path.exists(BENCHMARK_MODEL_PATH) or not os.path.exists(FUSION_MODEL_PATH):
-        print("Model files missing! Please run training scripts first.")
+        print("  Model files missing! Ensure model training artifacts are present.")
         sys.exit(1)
 
-    print("Loading Model Artifacts...")
+    print("  Loading Model Artifacts (POLIDriving Fusion, VZCrash Benchmark, & Anomaly Detector)...")
     fusion_model = joblib.load(FUSION_MODEL_PATH)
     fusion_scaler = joblib.load(FUSION_SCALER_PATH)
     benchmark_model = joblib.load(BENCHMARK_MODEL_PATH)
     anomaly_model = joblib.load(ANOMALY_MODEL_PATH)
     benchmark_scaler = joblib.load(BENCHMARK_SCALER_PATH)
-    map_resolver = MapContextResolver()
 
-    print("Listening for multi-driver phone telemetry stream on port 8003...")
+    map_resolver = MapContextResolver()
+    weather_resolver = WeatherContextResolver(api_key=OPENWEATHER_API_KEY, poll_interval_sec=300)
+
+    print("  Listening for remote phone telemetry stream on port 8003...")
     start_receiver()
 
-    print("\n" + "=" * 105)
-    print("PROACTIVE CONTEXT-AWARE INFERENCE ENGINE ONLINE (STUDENT LEVEL LOGIC)")
-    print("=" * 105 + "\n")
+    prev_speed_mps, prev_time = None, None
+    smoothed_accel = 9.8
+
+    csv_dir = "data/recordings"
+    os.makedirs(csv_dir, exist_ok=True)
+    session_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = os.path.join(csv_dir, f"realtime_telemetry_{session_timestamp}.csv")
+    csv_file = open(csv_path, mode="w", newline="", encoding="utf-8")
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow([
+        "timestamp", "time_str", "latitude", "longitude", "speed_kmh", "rpm",
+        "throttle", "engine_load", "accel_obd", "accel_mag", "gyro_mag",
+        "jerk", "hr_velocity", "heart_rate", "weather_cond", "weather_mult",
+        "in_roundabout", "polidriving_risk", "vzcrash_risk", "fused_risk_score",
+        "class_pred", "class_label", "is_anomaly"
+    ])
+    csv_file.flush()
+    print(f"  CSV Logging initialized: {csv_path}")
+
+    print("\n" + "=" * 110)
+    print("   PROACTIVE MULTIMODAL INFERENCE ENGINE + LIVE WEATHER SCALING ONLINE")
+    print("=" * 110 + "\n")
 
     try:
         while True:
+            t_now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             current_time = time.time()
-            active_streams = []
-
+            
             with state_lock:
-                for sid, d in list(drivers.items()):
-                    if (current_time - d.last_stream_time) <= HARDWARE_TIMEOUT_SEC:
-                        active_streams.append(sid)
+                sid = live_state.get("stream_id", "driver-default")
+                lat = live_state["lat"]
+                lon = live_state["lon"]
+                speed_kmh = live_state["speed"]
+                rpm = live_state["rpm"]
+                throttle = live_state["throttle"]
+                load = live_state["load"]
+                raw_accel_mag = live_state["accel_mag"]
+                gyro_mag = live_state["gyro_mag"]
+                hr = live_state["instant_hr"]
+                mean_hr = live_state["mean_hr_30s"]
+                rmssd = live_state["rmssd_30s"]
+                sdnn = live_state["sdnn_30s"]
+                pnn50 = live_state["pnn50_30s"]
+                
+                eyes_on_road = live_state["eyes_on_road"]
+                eyes_closed_sec = live_state["eyes_closed_sec"]
+                traffic_level = live_state["traffic_level"]
+                lead_closing_fast = live_state["lead_closing_fast"]
+                
+                android_active = (current_time - live_state["last_android_time"]) <= HARDWARE_TIMEOUT_SEC
+                obd_active = (current_time - live_state["last_obd_time"]) <= HARDWARE_TIMEOUT_SEC
 
-            if not active_streams:
+            if not android_active:
+                status_android = "  WAITING"
+                status_obd = "  OK" if obd_active else "  WAITING"
+                print(f"[{t_now}]   WAITING FOR REMOTE STREAM | GPS/Sensors: {status_android} | OBD-II: {status_obd}")
                 time.sleep(0.5)
                 continue
 
-            for sid in active_streams:
-                with state_lock:
-                    driver = drivers[sid]
-                    lat, lon = driver.lat, driver.lon
-                    speed_kmh, rpm = driver.speed, driver.rpm
-                    throttle, load = driver.throttle, driver.load
-                    raw_accel_mag = driver.accel_mag
-                    gyro_mag = driver.gyro_mag
-                    hr = driver.instant_hr
-                    
-                    # Ensure resting_hr has a fallback just in case
-                    resting_hr = driver.resting_hr if driver.resting_hr is not None else 65.0
-                    
-                    eyes_on_road = driver.eyes_on_road
-                    lead_closing_fast = driver.lead_closing_fast
+            # Update Weather Context
+            weather_resolver.update_location(lat, lon)
+            weather_cond, weather_mult, weather_desc = weather_resolver.get_context()
 
-                    obd_connected = driver.obd_connected
-                    whoop_connected = driver.whoop_connected
-                    obd_active = obd_connected or (
-                        (current_time - driver.last_obd_time) <= HARDWARE_TIMEOUT_SEC
-                        and (speed_kmh > 0 or rpm > 0)
-                    )
-                    whoop_active = whoop_connected and hr > 0
+            smoothed_accel = (0.4 * raw_accel_mag) + (0.6 * smoothed_accel)
+            speed_mps = speed_kmh * (1000.0 / 3600.0)
 
-                map_resolver.update_location(lat, lon)
-                design_speed = map_resolver.get_design_speed()
-                road_name = map_resolver.get_road_name()
-                speed_bump_ahead = map_resolver.is_speed_bump_ahead()
+            accel_obd = 0.0
+            if prev_speed_mps is not None and prev_time is not None:
+                dt = current_time - prev_time
+                if dt > 0:
+                    accel_obd = (speed_mps - prev_speed_mps) / dt
+            prev_speed_mps = speed_mps
+            prev_time = current_time
 
-                if driver.smoothed_accel > 0:
-                    driver.smoothed_accel = (0.3 * raw_accel_mag) + (0.7 * driver.smoothed_accel)
+            history_buffer.append({"time": current_time, "accel": smoothed_accel, "hr": hr, "speed": speed_kmh})
+            jerk, hr_velocity = compute_predictive_metrics(history_buffer)
+
+            map_resolver.update_location(lat, lon)
+            design_speed = map_resolver.get_design_speed()
+            in_roundabout = map_resolver.is_in_roundabout()
+
+            # --- 1. POLIDRIVING REGRESSION MODEL ---
+            fusion_df = pd.DataFrame([{
+                "observation_hour": float(datetime.datetime.now().hour),
+                "speed": round(speed_kmh, 2),
+                "rpm": round(rpm, 2),
+                "acceleration": round(accel_obd, 3),
+                "throttle_position": round(throttle, 2),
+                "engine_temperature": 92.0,
+                "engine_load_value": round(load, 2),
+                "heart_rate": float(hr) if hr > 0 else 75.0,
+                "current_weather": 6.0,
+                "visibility": 10.0,
+                "precipitation": 0.0,
+                "accidents_onsite": 2.0,
+                "design_speed": float(design_speed),
+                "accidents_time": 1.0,
+            }])[POLIDRIVING_FEATURES]
+            polidriving_risk = float(fusion_model.predict_proba(fusion_scaler.transform(fusion_df))[0][1])
+
+            # --- 2. VZCRASH CLASSIFICATION MODEL ---
+            effective_accel = smoothed_accel if smoothed_accel > 0 else abs(accel_obd)
+            benchmark_sample = np.array([[effective_accel, gyro_mag, speed_kmh, abs(accel_obd)]])
+            benchmark_scaled = benchmark_scaler.transform(benchmark_sample)
+            vz_probs = benchmark_model.predict_proba(benchmark_scaled)[0]
+            class_pred = int(np.argmax(vz_probs))
+            p_crash, p_near_miss = vz_probs[0], vz_probs[1]
+            vzcrash_risk = float(1.0 * p_crash + 0.6 * p_near_miss)
+
+            base_fused_risk = ((0.5 * polidriving_risk) + (0.5 * vzcrash_risk)) * 100.0
+
+            # --- 3. PROACTIVE HAZARD BOOST & WEATHER SCALING ---
+            predictive_boost = 0.0
+            if jerk > 12.0:
+                predictive_boost += min(25.0, jerk * 1.5)
+            if hr_velocity > 3.0:
+                predictive_boost += min(15.0, hr_velocity * 2.5)
+
+            fused_risk_score = min(99.9, (base_fused_risk + predictive_boost) * weather_mult)
+
+            # --- 4. SWERVING / SHARP TURN & ROUNDABOUT SUPPRESSION ---
+            is_turning_or_swerving = (gyro_mag > 0.8 and effective_accel < 24.0)
+            if in_roundabout or is_turning_or_swerving:
+                if class_pred in (0, 1) and effective_accel < 24.0:
+                    class_pred = 2
+                    reason = "Roundabout Curve" if in_roundabout else "Sharp Turn / Swerve"
+                    class_label = f"NORMAL ({reason})"
+                    fused_risk_score = min(fused_risk_score, 18.0 * weather_mult)
                 else:
-                    driver.smoothed_accel = raw_accel_mag
+                    class_label = CLASS_MAP.get(class_pred, "UNKNOWN")
+            else:
+                class_label = CLASS_MAP.get(class_pred, "UNKNOWN")
 
-                speed_mps = speed_kmh * (1000.0 / 3600.0)
-                accel_obd = 0.0
-                if driver.prev_speed_mps is not None and driver.prev_time is not None:
-                    dt = current_time - driver.prev_time
-                    if dt > 0:
-                        accel_obd = (speed_mps - driver.prev_speed_mps) / dt
-                driver.prev_speed_mps = speed_mps
-                driver.prev_time = current_time
+            is_anomaly = anomaly_model.predict(benchmark_scaled)[0] == -1
+            if (in_roundabout or is_turning_or_swerving) and is_anomaly and effective_accel < 24.0:
+                is_anomaly = False
 
-                # --- 1. POLIDRIVING BASELINE MODEL ---
-                if obd_active or whoop_active:
-                    fusion_df = pd.DataFrame([{
-                        "observation_hour": float(datetime.datetime.now().hour),
-                        "speed": round(speed_kmh, 2),
-                        "rpm": round(rpm, 2),
-                        "acceleration": round(accel_obd, 3),
-                        "throttle_position": round(throttle, 2),
-                        "engine_temperature": 92.0,
-                        "engine_load_value": round(load, 2),
-                        "heart_rate": float(hr) if hr > 0 else 75.0,
-                        "current_weather": 6.0,
-                        "visibility": 10.0,
-                        "precipitation": 0.0,
-                        "accidents_onsite": 2.0,
-                        "design_speed": float(design_speed),
-                        "accidents_time": 1.0,
-                    }])[POLIDRIVING_FEATURES]
-                    fusion_probs = fusion_model.predict_proba(fusion_scaler.transform(fusion_df))[0]
-                    base_risk = float(np.sum(fusion_probs[1:])) * 100.0
-                else:
-                    base_risk = 0.0
+            # --- 5. TERMINAL LOG DISPLAY ---
+            score_color = "\033[91m" if fused_risk_score >= 60.0 else ("\033[93m" if fused_risk_score >= 30.0 else "\033[92m")
+            anomaly_color = "\033[91m" if is_anomaly else "\033[92m"
+            reset = "\033[0m"
 
-                # --- 2. VZCRASH DETECTION (NOW SEPARATED FROM PREDICTION RISK) ---
-                effective_accel = driver.smoothed_accel if driver.smoothed_accel > 0 else abs(accel_obd)
+            rb_tag = ""
+            if in_roundabout:
+                rb_tag = "   [ROUNDABOUT]"
+            elif is_turning_or_swerving:
+                rb_tag = "   [SWERVE/TURN]"
+            elif predictive_boost > 10.0:
+                rb_tag = "   [PREDICTIVE WARNING]"
+
+            obd_tag = "  OBD" if obd_active else "  NO OBD"
+            weather_tag = f"   [{weather_cond} {weather_mult}x]" if weather_mult > 1.0 else ""
+
+            print(
+                f"[{t_now}]   Lat:{lat:.6f}, Lon:{lon:.6f}{rb_tag}{weather_tag} | "
+                f"  Speed:{speed_kmh:4.1f}km/h ({obd_tag}) | RPM:{rpm:4.0f} | "
+                f"  HR:{hr:3.0f}bpm | "
+                f"  Risk:{score_color}{fused_risk_score:5.1f}%{reset} | "
+                f"  VZCrash:{class_label} | "
+                f"  Anomaly:{anomaly_color}{'YES' if is_anomaly else 'NO'}{reset}"
+            )
+
+            # --- 6. LOG FRAME TO CSV ---
+            csv_writer.writerow([
+                round(current_time, 3), t_now, round(lat, 6), round(lon, 6),
+                round(speed_kmh, 2), round(rpm, 1), round(throttle, 2), round(load, 2),
+                round(accel_obd, 3), round(raw_accel_mag, 3), round(gyro_mag, 3),
+                round(jerk, 3), round(hr_velocity, 3), int(hr), weather_cond,
+                weather_mult, bool(in_roundabout), round(polidriving_risk, 4),
+                round(vzcrash_risk, 4), round(fused_risk_score, 2), class_pred,
+                class_label, bool(is_anomaly)
+            ])
+            csv_file.flush()
+
+            # --- 7. ASYNCHRONOUS DASHBOARD FORWARDING ---
+            async_forward_to_dashboard({
+                "timestamp": current_time,
+                "stream_id": sid,                 
+                "source": "ml_runner",            
+                "vehicle_speed": float(speed_mps),
+                "rpm": float(rpm) if rpm > 0 else None,
+                "throttle_position": float(throttle) if throttle > 0 else None,
+                "engine_load": float(load) if load > 0 else None,
+                "gps_latitude": float(lat) if lat != 0.0 else None,
+                "gps_longitude": float(lon) if lon != 0.0 else None,
+                "heart_rate": float(hr) if hr > 0 else None,
+                "accel_x": float(smoothed_accel),
+                "gyro_z": float(gyro_mag),
+                "weather_condition": weather_cond,
+                "weather_multiplier": weather_mult,
+                "risk_score": fused_risk_score,
                 
-                # If a speed bump is coming up, ignore vertical G-force spikes!
-                if speed_bump_ahead:
-                    effective_accel = min(effective_accel, 9.8)
-
-                benchmark_df = pd.DataFrame([{
-                    "effective_accel": effective_accel,
-                    "gyro_mag": gyro_mag,
-                    "speed_kmh": speed_kmh,
-                    "abs_accel_obd": abs(accel_obd),
-                }])
-                benchmark_scaled = benchmark_scaler.transform(benchmark_df)
-                vz_probs = benchmark_model.predict_proba(benchmark_scaled)[0]
-                class_pred = int(np.argmax(vz_probs))
-                is_anomaly = anomaly_model.predict(benchmark_scaled)[0] == -1 if effective_accel >= 22.0 else False
-
-                # Did an actual accident just happen?
-                accident_detected = False
-                if class_pred == 0 or is_anomaly:
-                    accident_detected = True
-
-                # --- 3. THE NEW CONTEXT-AWARE RISK LOGIC ---
-                
-                target_risk = base_risk
-                context_label = "NORMAL"
-
-                # Calculate Heart Rate Stress (Delta from Resting)
-                hr_delta = hr - resting_hr if whoop_active else 0.0
-                driver_is_calm = hr_delta < 20.0
-
-                if accident_detected:
-                    target_risk = 100.0
-                    context_label = "CRASH DETECTED"
-                    
-                # PARKED / IDLING OVERRIDE
-                elif speed_kmh < 2.0 and effective_accel < 12.0:
-                    target_risk = 0.0
-                    context_label = "PARKED / IDLING"
-
-                elif speed_kmh > 0:
-                    # RULE 1: Immediate Hazard (Distracted + Car braking ahead)
-                    if not eyes_on_road and lead_closing_fast:
-                        target_risk = 95.0
-                        context_label = "CRITICAL: IMMINENT HAZARD"
-                    
-                    # RULE 2: Just Distracted (Empty road ahead)
-                    elif not eyes_on_road and not lead_closing_fast:
-                        target_risk = 35.0  # Keep it at medium warning, not critical
-                        context_label = "WARNING: DISTRACTED"
-                    
-                    # RULE 3: Speeding but Calm ("Driver in Control")
-                    elif speed_kmh > design_speed and driver_is_calm and eyes_on_road:
-                        target_risk = min(target_risk, 20.0) # Suppress risk score
-                        context_label = "SPEEDING (CALM/CONTROLLED)"
-
-                # Exponential smoothing for UI stability
-                if driver.smoothed_fused_risk == 0.0:
-                    driver.smoothed_fused_risk = target_fused_risk = target_risk
-                else:
-                    driver.smoothed_fused_risk = (0.25 * target_risk) + (0.75 * driver.smoothed_fused_risk)
-
-                # Floor the visual risk to 0 if the math pushes it slightly below 0
-                driver.smoothed_fused_risk = max(0.0, driver.smoothed_fused_risk)
-
-                risk_index_val = round(float(driver.smoothed_fused_risk) / 100.0, 2)
-                if risk_index_val < 0.25:
-                    risk_level_val = "LOW"
-                elif risk_index_val < 0.55:
-                    risk_level_val = "MEDIUM"
-                elif risk_index_val < 0.80:
-                    risk_level_val = "HIGH"
-                else:
-                    risk_level_val = "CRITICAL"
-
-                t_now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                score_color = "\033[91m" if driver.smoothed_fused_risk >= 60.0 else ("\033[93m" if driver.smoothed_fused_risk >= 25.0 else "\033[92m")
-                reset = "\033[0m"
-                
-                bump_tag = "[BUMP AHEAD]" if speed_bump_ahead else ""
-                
-                # Format RHR strictly as an integer for cleaner output
-                rhr_display = f"{resting_hr:.0f}" if resting_hr else "---"
-                
-                print(
-                    f"[{t_now}] {road_name[:14]:<14} {bump_tag:<13} | "
-                    f"Speed:{speed_kmh:4.0f} | HR:{hr:3.0f} (RHR:{rhr_display}) | "
-                    f"Risk:{score_color}{driver.smoothed_fused_risk:5.1f}% [{risk_level_val}]{reset} | "
-                    f"Status: {context_label}"
-                )
-
-                # Forward to FastAPI Dashboard
-                async_forward_to_dashboard({
-                    "timestamp": current_time,
-                    "stream_id": sid,
-                    "source": "ml_runner",
-                    "speed": float(speed_kmh) if obd_active else 0.0,
-                    "vehicle_speed": float(speed_mps) if obd_active else 0.0,
-                    "rpm": float(rpm) if obd_active else 0.0,
-                    "throttle": float(throttle) if obd_active else 0.0,
-                    "engine_load": float(load) if obd_active else 0.0,
-                    "gps_latitude": float(lat) if lat != 0.0 else None,
-                    "gps_longitude": float(lon) if lon != 0.0 else None,
-                    "heart_rate": float(hr) if whoop_active else None,
-                    "accel_x": float(driver.smoothed_accel),
-                    "gyro_z": float(gyro_mag),
-                    "risk_index": risk_index_val,
-                    "risk_level": risk_level_val,
-                    "risk_score": float(driver.smoothed_fused_risk),
-                    "fused_risk": float(driver.smoothed_fused_risk),
-                    "class_label": context_label,
-                    "obd_connected": bool(obd_active),
-                    "wearable_connected": bool(whoop_active),
-                })
-
+                # FIX: Explicitly forward the dynamic CV metrics to the web dashboard
+                "eyes_on_road": eyes_on_road,
+                "eyes_closed_sec": eyes_closed_sec,
+                "traffic_level": traffic_level,
+                "lead_closing_fast": lead_closing_fast
+            })
             time.sleep(0.1)
 
     except KeyboardInterrupt:
-        print("\n\nStopped live multi-stream inference.")
+        print("\n\n  Stopped live inference stream.")
+    finally:
+        if "csv_file" in locals() and not csv_file.closed:
+            csv_file.close()
+            print(f"  Telemetry log saved: {csv_path}")
 
 if __name__ == "__main__":
     main()
