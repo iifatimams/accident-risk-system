@@ -1,4 +1,5 @@
 """Product API behind the operator and driver interface. Mounted at /app/api."""
+
 import time
 from typing import Annotated, Any
 from uuid import uuid4
@@ -10,8 +11,33 @@ from accident_risk.api.auth import AuthError, AuthService, Principal, bearer_fro
 from accident_risk.api.db import Database, role_allows
 from accident_risk.api.recorder import SessionRecorder
 from accident_risk.inference.engine import InferenceEngine
+from accident_risk.schemas import SENSOR_FIELDS
 
 SESSION_TIMEOUT_SECONDS = 180.0
+EDGE_FRESHNESS_SECONDS = 10.0
+
+
+def has_sensor_values(fields: dict[str, Any]) -> bool:
+    """Don't mistake the frame's metadata for fresh sensor measurements."""
+    return any(fields.get(name) is not None for name in SENSOR_FIELDS)
+
+
+def movement_confirmed(fields: dict[str, Any]) -> bool:
+    """Fallback for legacy streams without an explicit phone driving state.
+
+    Do not treat an elevated heart rate or idling RPM as evidence of driving.
+    """
+    vehicle_speed = fields.get("vehicle_speed")
+    gps_speed = fields.get("gps_speed")
+    speed_mps = vehicle_speed if vehicle_speed is not None else gps_speed
+    return speed_mps is not None and speed_mps >= 8.0 / 3.6
+
+
+def speed_in_kmh(fields: dict[str, Any]) -> float | None:
+    vehicle_speed = fields.get("vehicle_speed")
+    gps_speed = fields.get("gps_speed")
+    speed_mps = vehicle_speed if vehicle_speed is not None else gps_speed
+    return speed_mps * 3.6 if speed_mps is not None else None
 
 
 class CodeRequest(BaseModel):
@@ -59,6 +85,7 @@ class DeviceRequest(BaseModel):
 
 
 class DevicePatch(BaseModel):
+    identifier: str | None = Field(None, min_length=1, max_length=120)
     status: str | None = None
     assigned_to: int | None = None
     clear_assignment: bool = False
@@ -85,8 +112,28 @@ def create_router(
     auth: AuthService,
     recorder: SessionRecorder,
     engine: InferenceEngine,
+    edge_state: dict[str, dict[str, Any]] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/app/api", tags=["application"])
+    edge_state = edge_state if edge_state is not None else {}
+
+    def driving_state(stream_id: str, fields: dict[str, Any], now: float) -> bool | None:
+        """True=driving; False=not driving; None=no recent confirmation.
+
+        An edge-owned stream never falls back to a legacy predictor or RPM/HR.
+        """
+        state = edge_state.get(stream_id, {})
+        if state.get("edge_owned"):
+            if not 0 <= now - state.get("received_at", 0.0) <= EDGE_FRESHNESS_SECONDS:
+                return None
+            return state.get("risk_active")
+        return movement_confirmed(fields) if has_sensor_values(fields) else None
+
+    def current_risk(stream_id: str, fields: dict[str, Any], now: float) -> tuple[float | None, bool | None]:
+        active = driving_state(stream_id, fields, now)
+        prediction = engine.latest.get(stream_id)
+        index = prediction.overall_risk_index if active is True and prediction else None
+        return index, active
 
     def get_principal(authorization: Annotated[str | None, Header()] = None) -> Principal:
         try:
@@ -167,35 +214,40 @@ def create_router(
         synchronizer = engine.pipeline.synchronizer
         stream_id = session["stream_id"] if session is not None else f"u{principal.user_id}-default"
         
-        if stream_id in synchronizer.values and any(synchronizer.snapshot(stream_id, now).model_dump().values()):
+        # Never borrow telemetry or predictions from a different stream.
+        if stream_id in synchronizer.values:
             snapshot = synchronizer.snapshot(stream_id, now).model_dump()
             ages = synchronizer.ages(stream_id, now)
-        elif "hardware" in synchronizer.values:
-            snapshot = synchronizer.snapshot("hardware", now).model_dump()
-            ages = synchronizer.ages("hardware", now)
 
-        prediction = engine.latest.get(stream_id) or engine.latest.get("hardware")
-        index = prediction.overall_risk_index if prediction else None
+        last_seen = synchronizer.last.get(stream_id)
+        fresh = last_seen is not None and 0 <= now - last_seen <= EDGE_FRESHNESS_SECONDS
+        if not fresh:
+            snapshot, ages = {}, {}
+
+        index, active = current_risk(stream_id, snapshot, now)
+        if session is None:
+            # An ended/not-yet-started trip must never keep displaying risk.
+            index, active = None, None
 
         raw_speed = snapshot.get("vehicle_speed")
+        gps_speed = snapshot.get("gps_speed")
+        speed_kmh = speed_in_kmh(snapshot)
         rpm_val = snapshot.get("rpm")
         hr_val = snapshot.get("heart_rate")
-
-        vehicle_active = (raw_speed is not None and raw_speed > 0) or (rpm_val is not None and rpm_val > 0)
+        vehicle_active = raw_speed is not None or (rpm_val or 0) > 0
         wearable_active = hr_val is not None and hr_val > 0
-        upload_active = bool(snapshot and any(v is not None for v in snapshot.values()))
-
-        speed_kmh = (raw_speed * 3.6) if raw_speed is not None else snapshot.get("speed")
-        computed_level = risk_level_for(index, thresholds) if (index is not None and (vehicle_active or wearable_active)) else None
+        upload_active = fresh and has_sensor_values(snapshot)
+        computed_level = risk_level_for(index, thresholds)
 
         return {
             "session": session,
             "vehicle_connected": vehicle_active,
             "wearable_connected": wearable_active,
             "uploading": upload_active,
-            "risk_index": index if (vehicle_active or wearable_active) else None,
+            "risk_index": index,
             "risk_level": computed_level,
-            "speed_kmh": speed_kmh if vehicle_active else 0.0,
+            "risk_active": active,
+            "speed_kmh": speed_kmh if speed_kmh is not None else 0.0,
             "rpm": rpm_val if vehicle_active else 0.0,
             "engine_load": snapshot.get("engine_load") if vehicle_active else 0.0,
             "throttle": (snapshot.get("throttle_position") or snapshot.get("throttle")) if vehicle_active else 0.0,
@@ -211,7 +263,7 @@ def create_router(
                 ),
                 None,
             ),
-            "models_loaded": len(engine.models) or (1 if prediction is not None else 0),
+            "models_loaded": len(engine.models),
         }
 
     @router.post("/driver/session/start")
@@ -227,6 +279,7 @@ def create_router(
             session = database.start_session(principal.user_id, stream_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
         recorder.register(stream_id, session["id"])
         return session
 
@@ -235,7 +288,13 @@ def create_router(
         session = database.active_session(principal.user_id)
         if session is None:
             return {"status": "no_active_session"}
+
         summary = recorder.finish(session["id"], session["stream_id"], "driver_stopped")
+        # Clear any remaining risk so a stopped session cannot show Critical.
+        engine.latest.pop(session["stream_id"], None)
+        state = edge_state.get(session["stream_id"])
+        if state is not None:
+            state["risk_active"] = False
         return {"session": database.get_session(session["id"]), "summary": summary}
 
     @router.post("/driver/collision")
@@ -267,6 +326,7 @@ def create_router(
             raise HTTPException(404, "Alert not found")
         if not role_allows(principal.role, "account_manager") and (existing["user_id"] != principal.user_id):
             raise HTTPException(403, "You can only act on your own alerts")
+
         status = "confirmed" if action == "confirm" else "cancelled"
         updated = database.set_alert_status(alert_id, status, principal.user_id)
         if updated is None:
@@ -306,10 +366,13 @@ def create_router(
             fields: dict[str, Any] = {}
             if stream_id in synchronizer.values:
                 fields = synchronizer.snapshot(stream_id, now).model_dump()
-            elif "hardware" in synchronizer.values:
-                fields = synchronizer.snapshot("hardware", now).model_dump()
-            prediction = engine.latest.get(stream_id) or engine.latest.get("hardware")
-            index = prediction.overall_risk_index if prediction else None
+
+            last_seen = synchronizer.last.get(stream_id)
+            fresh = last_seen is not None and 0 <= now - last_seen <= EDGE_FRESHNESS_SECONDS
+            if not fresh:
+                fields = {}
+
+            index, active = current_risk(stream_id, fields, now)
             drivers.append(
                 {
                     "session_id": session["id"],
@@ -319,12 +382,13 @@ def create_router(
                     "started_at": session["started_at"],
                     "risk_index": index,
                     "risk_level": risk_level_for(index, thresholds),
-                    "speed_kmh": fields.get("vehicle_speed") * 3.6 if fields.get("vehicle_speed") is not None else fields.get("speed"),
+                    "risk_active": active,
+                    "speed_kmh": speed_in_kmh(fields),
                     "heart_rate": fields.get("heart_rate"),
                     "latitude": fields.get("gps_latitude"),
                     "longitude": fields.get("gps_longitude"),
-                    "last_seen": synchronizer.last.get(stream_id) or synchronizer.last.get("hardware"),
-                    "receiving": bool(fields) and any(v is not None for v in fields.values()),
+                    "last_seen": last_seen,
+                    "receiving": fresh and has_sensor_values(fields),
                 }
             )
         database.log_access(principal.user_id, principal.role, "live")
@@ -390,6 +454,7 @@ def create_router(
         try:
             device = database.update_device(
                 device_id,
+                identifier=payload.identifier,
                 status=payload.status,
                 assigned_to=payload.assigned_to,
                 clear_assignment=payload.clear_assignment,

@@ -1,9 +1,11 @@
 /* RoadSense driver and operator interface.
    Vanilla ES2020, no build step. Talks to /app/api. */
+
 "use strict";
 
 const API = "/app/api";
 const STORE = "roadsense.token";
+const native = typeof RoadSenseNative !== "undefined" ? RoadSenseNative : null;
 
 const state = {
   token: null,
@@ -17,8 +19,6 @@ const state = {
   armedStream: null,
 };
 
-/* ────────────────────────────────── utilities ─────────────────────────── */
-
 const $ = (sel, root = document) => root.querySelector(sel);
 
 function esc(value) {
@@ -28,21 +28,21 @@ function esc(value) {
   ));
 }
 
-function num(value, digits = 0, fallback = "—") {
+function num(value, digits = 0, fallback = " ") {
   return value === null || value === undefined || Number.isNaN(value)
     ? fallback
     : Number(value).toFixed(digits);
 }
 
 function clock(seconds) {
-  if (!seconds) return "—";
+  if (!seconds) return " ";
   return new Date(seconds * 1000).toLocaleString(undefined, {
     day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
   });
 }
 
 function duration(seconds) {
-  if (seconds === null || seconds === undefined) return "—";
+  if (seconds === null || seconds === undefined) return " ";
   const total = Math.max(0, Math.round(seconds));
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
@@ -63,9 +63,11 @@ async function api(path, { method = "GET", body } = {}) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
+
   const response = await fetch(API + path, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
   });
+
   if (response.status === 401) {
     signOut(true);
     throw new Error("Your session has expired. Sign in again.");
@@ -82,8 +84,6 @@ async function api(path, { method = "GET", body } = {}) {
   }
   return payload;
 }
-
-/* ───────────────────────────────── sign in ────────────────────────────── */
 
 function showSignIn() {
   document.body.dataset.view = "signin";
@@ -149,14 +149,11 @@ async function signOut(silent = false) {
   state.token = null;
   state.user = null;
   localStorage.removeItem(STORE);
-  $("#phone").value = "";
   $("#code").value = "";
   showSignIn();
 }
 
 $("#signout").addEventListener("click", () => signOut());
-
-/* ───────────────────────────────── routing ────────────────────────────── */
 
 const ROLE_NAMES = {
   driver: "Driver", account_manager: "Account manager", administrator: "Administrator",
@@ -228,8 +225,6 @@ function poll(fn, ms) {
   state.timer = setInterval(fn, ms);
 }
 
-/* ─────────────────────────────── driver view ──────────────────────────── */
-
 const RISK_COPY = {
   LOW: "Driving pattern and heart rate are both in their usual range.",
   MEDIUM: "Something is drifting. Ease off and keep more distance.",
@@ -239,7 +234,7 @@ const RISK_COPY = {
 
 async function driveView() {
   $("#main").innerHTML = `
-    <div class="drive-grid">
+    <div class="drive-grid" style="grid-template-areas: 'risk session' 'cv kit' 'readings kit';">
       <div class="risk area-risk" id="risk-panel">
         <div class="risk-state" id="risk-state">No session</div>
         <div class="risk-index" id="risk-index">Start a session to begin monitoring.</div>
@@ -253,6 +248,15 @@ async function driveView() {
         <div class="links" id="links"></div>
         <div style="margin-top:16px" id="session-actions"></div>
       </div>
+      
+      <!-- COMPUTER VISION PANEL (EDGE AI - HEADLESS) -->
+      <div class="card area-cv" style="grid-area: cv;">
+        <div class="card-head"><h2>Vision Diagnostics (Edge AI)</h2></div>
+        <div style="font-family:monospace; font-size:13px; line-height:1.6;" id="cv-debug">
+            Awaiting camera stream...
+        </div>
+      </div>
+
       <div class="card area-readings">
         <div class="card-head"><h2>Live readings</h2></div>
         <div class="readouts" id="readouts"></div>
@@ -262,20 +266,48 @@ async function driveView() {
         <div id="kit"></div>
       </div>
     </div>`;
-  poll(refreshDriver, 2000);
+  poll(refreshDriver, 1000); 
 }
 
 async function refreshDriver() {
   let data;
-  try { data = await api("/driver/state"); } catch { return; }
-  const level = data.risk_level;
+  try { 
+      data = await api("/driver/state"); 
+  } catch { return; }
+  
+  try {
+      const streamParam = data.session ? `?stream_id=${encodeURIComponent(data.session.stream_id)}` : "";
+      const response = await fetch("/api/v1/predict/live" + streamParam);
+      const liveCV = await response.json();
+      
+      data.cv_eyes_on_road = liveCV.cv_eyes_on_road;
+      data.cv_eyes_closed_sec = liveCV.cv_eyes_closed_sec;
+      data.cv_traffic = liveCV.cv_traffic;
+      data.cv_pedestrians_detected = liveCV.cv_pedestrians_detected;
+      data.cv_pedestrian_count = liveCV.cv_pedestrian_count;
+      data.cv_closing_fast = liveCV.cv_closing_fast;
+      data.cv_camera_status = liveCV.cv_camera_status;
+      data.cv_debug_face_detected = liveCV.cv_debug_face_detected;
+      data.cv_debug_pitch = liveCV.cv_debug_pitch;
+      data.cv_debug_yaw = liveCV.cv_debug_yaw;
+      data.cv_debug_roll = liveCV.cv_debug_roll;
+      data.cv_debug_ear = liveCV.cv_debug_ear;
+  } catch (e) {
+      console.log("CV feed unavailable yet");
+  }
+
+  const running = Boolean(data.session);
+  // The server must explicitly report driving status for Core ML sessions.
+  // A null status means telemetry has not yet arrived or is stale.
+  const driving = running && data.risk_active === true;
+  const notDriving = running && data.risk_active === false;
+  const score = driving && Number.isFinite(Number(data.risk_index)) && data.risk_index !== null
+    ? Number(data.risk_index) : null;
+  const level = score === null ? null : data.risk_level;
   const panel = $("#risk-panel");
   if (!panel) return;
   panel.style.setProperty("--state", level ? `var(--${level.toLowerCase()})` : "var(--muted)");
 
-  const running = Boolean(data.session);
-  // Re-arm native capture if the app was restarted while a session was open:
-  // the server still has the session, but the service may have been killed.
   if (native && running && state.armedStream !== data.session.stream_id) {
     state.armedStream = data.session.stream_id;
     native.sessionStarted(data.session.stream_id);
@@ -283,20 +315,57 @@ async function refreshDriver() {
     state.armedStream = null;
     native.sessionEnded();
   }
-  $("#risk-state").textContent = level || (running ? "Warming up" : "No session");
-  $("#risk-index").textContent = data.risk_index !== null && data.risk_index !== undefined
-    ? `Risk index ${num(data.risk_index, 2)} of 1.00`
-    : running
-      ? data.models_loaded ? "Waiting for enough sensor data." : "No risk model is loaded."
-      : "Start a session to begin monitoring.";
-  $("#risk-note").textContent = (level && RISK_COPY[level])
-    || "The risk index is a research output, not a probability of a crash.";
+
+  $("#risk-state").textContent = !running ? "No session"
+    : notDriving ? "Not driving"
+    : driving ? (level || "Analyzing") : "Waiting for telemetry";
+  $("#risk-index").textContent = !running
+    ? "Start a session to begin monitoring."
+    : notDriving ? "Vehicle stationary — risk prediction paused."
+    : !driving ? "Waiting for fresh driving data."
+    : score !== null ? `Risk index ${num(score, 2)} of 1.00`
+    : "Driving detected — waiting for on-device prediction.";
+
+  $("#risk-note").textContent = level && RISK_COPY[level]
+    ? RISK_COPY[level]
+    : notDriving ? "No accident-risk index is calculated while the vehicle is stationary."
+    : "The risk index is a research output, not a probability of a crash.";
 
   const order = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
   const reached = order.indexOf(level);
   $("#risk-bands").querySelectorAll("span").forEach((span, i) => {
     span.classList.toggle("on", reached >= 0 && i <= reached);
   });
+
+  const eyesOn = data.cv_eyes_on_road ?? null;
+  const eyesClosed = data.cv_eyes_closed_sec ?? null;
+  const traffic = data.cv_traffic ?? null;
+  const pedestriansDetected = data.cv_pedestrians_detected ?? null;
+  const pedestrianCount = data.cv_pedestrian_count ?? null;
+  const closingFast = data.cv_closing_fast ?? null;
+  const cameraStatus = data.cv_camera_status ?? null;
+  const faceDetected = data.cv_debug_face_detected ?? null;
+  const pitch = data.cv_debug_pitch ?? null;
+  const yaw = data.cv_debug_yaw ?? null;
+  const roll = data.cv_debug_roll ?? null;
+  const ear = data.cv_debug_ear ?? null;
+
+  $("#cv-debug").innerHTML = `
+      <strong>Camera status:</strong> ${cameraStatus === null ? "Unavailable" : esc(String(cameraStatus))}<br>
+      <strong>Eyes on Road:</strong> ${eyesOn === null ? "Unavailable" : eyesOn ? "YES" : "NO (Possible distraction)"}<br>
+      <strong>Eyes Closed:</strong> ${eyesClosed === null ? "Unavailable" : `${num(eyesClosed, 1)}s`}<br>
+      <strong>Traffic estimate:</strong> ${traffic === null ? "Unavailable" : esc(String(traffic).toUpperCase())}<br>
+      <strong>Pedestrians:</strong> ${pedestriansDetected === null ? "Unavailable" : pedestriansDetected ? `YES (${pedestrianCount ?? "?"})` : "None detected"}<br>
+      <strong>Lead vehicle closing:</strong> ${closingFast === null ? "Unavailable" : closingFast ? "Possible" : "Not detected"}<br>
+      <span style="opacity:0.7">
+        -- raw diagnostics (for calibration) --<br>
+        Face detected: ${faceDetected === null ? "n/a" : faceDetected ? "YES" : "NO"}<br>
+        Pitch: ${pitch === null ? "n/a" : num(pitch, 3)} (distracted if &lt; -0.4)<br>
+        Yaw: ${yaw === null ? "n/a" : num(yaw, 3)} (distracted if |yaw| &gt; 0.45)<br>
+        Roll: ${roll === null ? "n/a" : num(roll, 3)}<br>
+        Eye aspect ratio: ${ear === null ? "n/a" : num(ear, 3)} (closed if &lt; 0.18)
+      </span>
+  `;
 
   $("#links").innerHTML = [
     ["Vehicle adapter", data.vehicle_connected, "OBD-II over Bluetooth"],
@@ -342,21 +411,14 @@ async function refreshDriver() {
   else hideCollision();
 }
 
-/* Inside the Android app a native service owns the Bluetooth links, because a
-   browser cannot open a serial connection to an ELM327. The object is absent in
-   a normal browser, so these calls are no-ops there. */
-const native = typeof RoadSenseNative !== "undefined" ? RoadSenseNative : null;
-
 async function startSession() {
   try {
     const session = await api("/driver/session/start", { method: "POST", body: {} });
     if (native) {
-      // Record it as armed before the next poll runs, or the re-arm check above
-      // fires a second start and restarts capture mid-handshake.
       state.armedStream = session.stream_id;
       native.sessionStarted(session.stream_id);
     }
-    toast(native ? "Recording — keep the app installed and signed in" : "Session started");
+    toast(native ? "Recording   keep the app installed and signed in" : "Session started");
     refreshDriver();
   } catch (error) { toast(error.message, true); }
 }
@@ -369,12 +431,10 @@ async function stopSession() {
       native.sessionEnded();
     }
     const km = result.summary && result.summary.distance_km;
-    toast(km ? `Session saved — ${km} km` : "Session saved");
+    toast(km ? `Session saved   ${km} km` : "Session saved");
     refreshDriver();
   } catch (error) { toast(error.message, true); }
 }
-
-/* ──────────────────────────── collision takeover ──────────────────────── */
 
 function showCollision(alert) {
   if (state.collisionAlert === alert.id) return;
@@ -412,14 +472,12 @@ async function resolveCollision(action) {
 $("#collision-cancel").addEventListener("click", () => resolveCollision("cancel"));
 $("#collision-confirm").addEventListener("click", () => resolveCollision("confirm"));
 
-/* ─────────────────────────────── monitor view ─────────────────────────── */
-
 async function monitorView() {
   $("#main").innerHTML = `
     <div class="grid two">
       <div class="card">
         <div class="card-head"><h2>Live drivers</h2>
-          <span class="muted" id="live-count">—</span></div>
+          <span class="muted" id="live-count"> </span></div>
         <div class="map-frame">
           <div id="map"></div>
           <div class="map-fallback" id="map-fallback">
@@ -433,13 +491,12 @@ async function monitorView() {
         <div id="live-list"></div>
       </div>
     </div>`;
+
   if (window.L) {
     state.map = L.map("map", { zoomControl: true }).setView([25.33, 55.42], 11);
     const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
     });
-    // Only clear the fallback once a tile has actually painted, so a blocked or
-    // offline network leaves an explanation rather than an empty grey box.
     tiles.on("load", () => { const f = $("#map-fallback"); if (f) f.remove(); });
     tiles.addTo(state.map);
   }
@@ -452,16 +509,21 @@ async function refreshLive() {
   const drivers = data.drivers || [];
   const countEl = $("#live-count");
   if (!countEl) return;
+  const drivingCount = drivers.filter((d) => d.risk_active === true).length;
   countEl.textContent = drivers.length
-    ? `${drivers.length} driving now` : "Nobody is driving";
+    ? `${drivingCount} driving · ${drivers.length} active session${drivers.length === 1 ? "" : "s"}`
+    : "Nobody is driving";
 
   $("#live-list").innerHTML = drivers.length ? `
     <div class="table-wrap"><table>
       <thead><tr><th>Driver</th><th>Risk</th><th>Speed</th><th>Heart</th><th>Started</th></tr></thead>
       <tbody>${drivers.map((d) => `
         <tr><td>${esc(d.driver_name)}</td>
-        <td>${d.risk_level ? `<span class="pill ${d.risk_level.toLowerCase()}">${d.risk_level}</span>`
-      : '<span class="pill">warming up</span>'}</td>
+        <td>${d.risk_active === false ? '<span class="pill">Not driving</span>'
+      : d.risk_active !== true ? '<span class="pill">Waiting for telemetry</span>'
+      : d.risk_index !== null && d.risk_index !== undefined && d.risk_level
+        ? `<span class="pill ${esc(d.risk_level.toLowerCase())}">${esc(d.risk_level)}</span>`
+        : '<span class="pill">Analyzing</span>'}</td>
         <td class="num">${num(d.speed_kmh, 0)}</td>
         <td class="num">${num(d.heart_rate, 0)}</td>
         <td>${esc(clock(d.started_at))}</td></tr>`).join("")}
@@ -474,11 +536,15 @@ async function refreshLive() {
   drivers.forEach((d) => {
     if (d.latitude === null || d.longitude === null) return;
     seen.add(d.stream_id);
-    const colour = d.risk_level ? `var(--${d.risk_level.toLowerCase()})` : "var(--teal)";
+    const colour = d.risk_active === true && d.risk_level ? `var(--${d.risk_level.toLowerCase()})` : "var(--teal)";
     const initials = String(d.driver_name || "?").trim().charAt(0).toUpperCase();
     const existing = state.markers.get(d.stream_id);
     if (existing) {
       existing.setLatLng([d.latitude, d.longitude]);
+      // Refresh marker styling when driving state or risk band changes.
+      const markerEl = existing.getElement();
+      const pin = markerEl && markerEl.querySelector(".map-pin");
+      if (pin) pin.style.background = colour;
     } else {
       const icon = L.divIcon({
         className: "", iconSize: [34, 34], iconAnchor: [17, 17],
@@ -489,12 +555,11 @@ async function refreshLive() {
       state.markers.set(d.stream_id, marker);
     }
   });
+
   state.markers.forEach((marker, key) => {
     if (!seen.has(key)) { state.map.removeLayer(marker); state.markers.delete(key); }
   });
 }
-
-/* ─────────────────────────────── sessions ─────────────────────────────── */
 
 async function sessionsView() {
   const sessions = await api("/sessions?limit=100");
@@ -511,8 +576,8 @@ async function sessionsView() {
             ${manager ? `<td>${esc(s.driver_name)}</td>` : ""}
             <td>${esc(clock(s.started_at))}</td>
             <td class="num">${duration(s.summary.duration_seconds)}</td>
-            <td class="num">${s.summary.distance_km ?? "—"} km</td>
-            <td class="num">${s.summary.max_risk_index ?? "—"}</td>
+            <td class="num">${s.summary.distance_km ?? " "} km</td>
+            <td class="num">${s.summary.max_risk_index ?? " "}</td>
             <td>${s.ended_at
     ? (s.complete ? '<span class="pill">complete</span>'
       : '<span class="pill pending">gaps</span>')
@@ -532,16 +597,16 @@ async function sessionDetailView(id) {
   const sum = s.summary || {};
   const stats = [
     ["Duration", duration(sum.duration_seconds)],
-    ["Distance", `${sum.distance_km ?? "—"} km`],
-    ["Top speed", `${sum.max_speed_kmh ?? "—"} km/h`],
+    ["Distance", `${sum.distance_km ?? " "} km`],
+    ["Top speed", `${sum.max_speed_kmh ?? " "} km/h`],
     ["Idling", duration(sum.idling_seconds)],
-    ["Peak risk", sum.max_risk_index ?? "—"],
-    ["Mean heart rate", sum.mean_heart_rate ?? "—"],
+    ["Peak risk", sum.max_risk_index ?? " "],
+    ["Mean heart rate", sum.mean_heart_rate ?? " "],
   ];
   $("#main").innerHTML = `
     <div class="card">
       <div class="card-head">
-        <h2>${esc(s.driver_name)} — ${esc(clock(s.started_at))}</h2>
+        <h2>${esc(s.driver_name)}   ${esc(clock(s.started_at))}</h2>
         <button class="btn quiet small" id="back">Back to trips</button>
       </div>
       <div class="readouts">${stats.map(([label, value]) => `
@@ -568,8 +633,6 @@ async function sessionDetailView(id) {
     </div>`;
   $("#back").addEventListener("click", () => { location.hash = "#/sessions"; });
 }
-
-/* ──────────────────────────────── alerts ──────────────────────────────── */
 
 async function alertsView() {
   const alerts = await api("/alerts?limit=100");
@@ -604,8 +667,6 @@ async function alertsView() {
   });
 }
 
-/* ──────────────────────────────── drivers ─────────────────────────────── */
-
 async function driversView() {
   const [drivers, devices] = await Promise.all([api("/drivers"), api("/devices")]);
   const options = (kind) => devices
@@ -630,17 +691,20 @@ async function driversView() {
       <div class="card-head"><h2>Enrolled drivers</h2>
         <span class="muted">${drivers.length} in the pilot</span></div>
       ${drivers.length ? `<div class="table-wrap"><table>
-        <thead><tr><th>Name</th><th>Mobile</th><th>Kit</th><th>Account</th></tr></thead>
+        <thead><tr><th>Name</th><th>Mobile</th><th>Kit</th><th>Account</th><th></th></tr></thead>
         <tbody>${drivers.map((d) => `
           <tr><td>${esc(d.name)}</td><td>${esc(d.phone)}</td>
           <td>${d.kit.length ? d.kit.map((k) => esc(k.identifier)).join(", ")
     : '<span class="muted">none assigned</span>'}</td>
           <td><span class="pill ${d.active ? "active" : "cancelled"}">${
-  d.active ? "active" : "inactive"}</span></td></tr>`).join("")}
+  d.active ? "active" : "inactive"}</span></td>
+          <td><button class="btn quiet small" data-edit-driver="${d.id}" data-name="${esc(d.name)}">Edit Name</button></td>
+          </tr>`).join("")}
         </tbody></table></div>`
       : `<div class="empty"><strong>No drivers yet</strong>
          Enrol the first one above.</div>`}
     </div>`;
+
   $("#enrol").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -657,9 +721,22 @@ async function driversView() {
       driversView();
     } catch (error) { toast(error.message, true); }
   });
-}
 
-/* ──────────────────────────────── devices ─────────────────────────────── */
+  // Handle Driver Name Edits
+  $("#main").querySelectorAll("[data-edit-driver]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const newName = prompt("Enter new name for driver:", btn.dataset.name);
+      if (!newName || newName.trim() === "" || newName === btn.dataset.name) return;
+      try {
+        await api(`/users/${btn.dataset.editDriver}`, {
+          method: "PATCH", body: { name: newName.trim() },
+        });
+        toast("Driver name updated");
+        driversView();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+}
 
 async function devicesView() {
   const admin = state.user.role === "administrator";
@@ -684,9 +761,11 @@ async function devicesView() {
           ${admin ? "<th></th>" : ""}</tr></thead>
         <tbody>${devices.map((d) => `
           <tr><td>${d.kind === "adapter" ? "Adapter" : "Wearable"}</td>
-          <td>${esc(d.identifier)}</td>
+          <td>${esc(d.identifier)}
+             ${admin ? `<button class="btn quiet small" style="padding:0 6px; min-height:24px; margin-left:8px;" data-edit-device="${d.id}" data-ident="${esc(d.identifier)}">✎</button>` : ""}
+          </td>
           <td><span class="pill ${esc(d.status)}">${esc(d.status.replace(/_/g, " "))}</span></td>
-          <td>${esc(d.assigned_name || "—")}</td>
+          <td>${esc(d.assigned_name || " ")}</td>
           ${admin ? `<td><select data-assign="${d.id}">
             <option value="">Unassigned</option>
             ${drivers.map((u) => `<option value="${u.id}"${
@@ -696,6 +775,7 @@ async function devicesView() {
       : `<div class="empty"><strong>No devices</strong>
          ${admin ? "Add your first adapter above." : "An administrator adds devices."}</div>`}
     </div>`;
+
   const form = $("#add-device");
   if (form) form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -707,6 +787,7 @@ async function devicesView() {
       devicesView();
     } catch (error) { toast(error.message, true); }
   });
+
   $("#main").querySelectorAll("[data-assign]").forEach((select) => {
     select.addEventListener("change", async () => {
       const value = select.value;
@@ -720,9 +801,22 @@ async function devicesView() {
       } catch (error) { toast(error.message, true); }
     });
   });
-}
 
-/* ───────────────────────────────── users ──────────────────────────────── */
+  // Handle Device Identifier Edits
+  $("#main").querySelectorAll("[data-edit-device]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const newIdent = prompt("Enter new identifier:", btn.dataset.ident);
+      if (!newIdent || newIdent.trim() === "" || newIdent === btn.dataset.ident) return;
+      try {
+        await api(`/devices/${btn.dataset.editDevice}`, {
+          method: "PATCH", body: { identifier: newIdent.trim() },
+        });
+        toast("Device identifier updated");
+        devicesView();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+}
 
 async function usersView() {
   const users = await api("/users");
@@ -749,11 +843,15 @@ async function usersView() {
           <td>${esc(ROLE_NAMES[u.role] || u.role)}</td>
           <td><span class="pill ${u.active ? "active" : "cancelled"}">${
   u.active ? "active" : "inactive"}</span></td>
-          <td>${u.id === state.user.id ? '<span class="muted">you</span>'
+          <td>
+            <button class="btn quiet small" style="margin-right:8px;" data-edit-user="${u.id}" data-name="${esc(u.name)}">Edit Name</button>
+            ${u.id === state.user.id ? '<span class="muted">you</span>'
     : `<button class="btn small" data-toggle="${u.id}" data-active="${u.active}">${
-      u.active ? "Deactivate" : "Reactivate"}</button>`}</td></tr>`).join("")}
+      u.active ? "Deactivate" : "Reactivate"}</button>`}
+          </td></tr>`).join("")}
       </tbody></table></div>
     </div>`;
+
   $("#add-user").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -768,6 +866,7 @@ async function usersView() {
       usersView();
     } catch (error) { toast(error.message, true); }
   });
+
   $("#main").querySelectorAll("[data-toggle]").forEach((button) => {
     button.addEventListener("click", async () => {
       try {
@@ -779,9 +878,22 @@ async function usersView() {
       } catch (error) { toast(error.message, true); }
     });
   });
-}
 
-/* ──────────────────────────────── settings ────────────────────────────── */
+  // Handle General User Name Edits
+  $("#main").querySelectorAll("[data-edit-user]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const newName = prompt("Enter new name:", btn.dataset.name);
+      if (!newName || newName.trim() === "" || newName === btn.dataset.name) return;
+      try {
+        await api(`/users/${btn.dataset.editUser}`, {
+          method: "PATCH", body: { name: newName.trim() },
+        });
+        toast("User renamed");
+        usersView();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+}
 
 const SETTING_COPY = {
   risk_medium_threshold: ["Medium risk starts at", "Below this the driver sees Low."],
@@ -824,8 +936,6 @@ async function settingsView() {
     } catch (error) { toast(error.message, true); }
   });
 }
-
-/* ───────────────────────────────── startup ────────────────────────────── */
 
 async function start() {
   state.user = await api("/me");

@@ -1,12 +1,9 @@
-"""SQLite persistence for users, kits, sessions and alerts.
-
-Standard library only: no new dependencies. Every call opens a short-lived
-connection so the store is safe to use from FastAPI's thread pool. Timestamps
-are Unix seconds UTC, matching ``SensorFrame.timestamp``.
+"""SQLite persistence for users, kits, sessions and alerts. Standard library only: no new dependencies.
+Every call opens a short-lived connection so the store is safe to use from FastAPI's thread pool.
+Timestamps are Unix seconds UTC, matching ``SensorFrame.timestamp``.
 """
 
 from __future__ import annotations
-
 import json
 import sqlite3
 import time
@@ -18,7 +15,6 @@ from typing import Any
 ROLES: tuple[str, ...] = ("driver", "account_manager", "administrator")
 # Higher rank inherits every capability of the ranks below it.
 ROLE_RANK: dict[str, int] = {"driver": 0, "account_manager": 1, "administrator": 2}
-
 DEVICE_KINDS: tuple[str, ...] = ("adapter", "wearable")
 DEVICE_STATUSES: tuple[str, ...] = ("active", "spare", "out_of_service")
 ALERT_KINDS: tuple[str, ...] = ("high_risk", "collision")
@@ -213,6 +209,7 @@ class Database:
         """Change a user's name, role or active flag. Returns the updated row."""
         if role is not None and role not in ROLES:
             raise ValueError(f"Unknown role: {role}")
+
         updates: dict[str, Any] = {}
         if name is not None:
             updates["name"] = name.strip()
@@ -220,8 +217,10 @@ class Database:
             updates["role"] = role
         if active is not None:
             updates["active"] = int(active)
+
         if not updates:
             return self.get_user(user_id)
+
         assignments = ", ".join(f"{key} = ?" for key in updates)
         with self.connect() as connection:
             connection.execute(
@@ -255,27 +254,36 @@ class Database:
             return [dict(r) for r in rows]
 
     def update_device(
-        self, device_id: int, *, status: str | None = None, assigned_to: int | None = None,
+        self, device_id: int, *, identifier: str | None = None, status: str | None = None, assigned_to: int | None = None,
         clear_assignment: bool = False,
     ) -> dict[str, Any] | None:
-        """Change a device's status or assignment. Assigning also marks it active."""
+        """Change a device's identifier, status or assignment. Assigning also marks it active."""
         if status is not None and status not in DEVICE_STATUSES:
             raise ValueError(f"Unknown device status: {status}")
+
         updates: dict[str, Any] = {}
+        if identifier is not None:
+            updates["identifier"] = identifier.strip()
         if status is not None:
             updates["status"] = status
+
         if clear_assignment:
             updates["assigned_to"] = None
         elif assigned_to is not None:
             updates["assigned_to"] = assigned_to
             updates.setdefault("status", "active")
+
         if not updates:
             return self._fetch_one("SELECT * FROM devices WHERE id = ?", (device_id,))
+
         assignments = ", ".join(f"{key} = ?" for key in updates)
         with self.connect() as connection:
-            connection.execute(
-                f"UPDATE devices SET {assignments} WHERE id = ?", (*updates.values(), device_id)
-            )
+            try:
+                connection.execute(
+                    f"UPDATE devices SET {assignments} WHERE id = ?", (*updates.values(), device_id)
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("A device with that identifier already exists") from exc
             return self._row(connection, "devices", device_id)
 
     def kit_for_user(self, user_id: int) -> list[dict[str, Any]]:
@@ -393,8 +401,10 @@ class Database:
         if user_id is not None:
             query += " WHERE s.user_id = ?"
             params.append(user_id)
+        
         query += " ORDER BY s.started_at DESC LIMIT ?"
         params.append(limit)
+        
         with self.connect() as connection:
             rows = connection.execute(query, params)
             return [self._decode_session(dict(r)) for r in rows]
@@ -420,6 +430,7 @@ class Database:
             raise ValueError(f"Unknown alert kind: {kind}")
         if status not in ALERT_STATUSES:
             raise ValueError(f"Unknown alert status: {status}")
+
         with self.connect() as connection:
             cursor = connection.execute(
                 "INSERT INTO alerts(session_id, user_id, kind, status, created_at, risk_index, "
@@ -456,10 +467,13 @@ class Database:
         if kind is not None:
             clauses.append("a.kind = ?")
             params.append(kind)
+            
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
+            
         query += " ORDER BY a.created_at DESC LIMIT ?"
         params.append(limit)
+        
         with self.connect() as connection:
             return [dict(r) for r in connection.execute(query, params)]
 
@@ -474,16 +488,20 @@ class Database:
         """Validate and store threshold changes; rejects out-of-order thresholds."""
         current = self.get_settings()
         merged = {**current, **{k: float(v) for k, v in values.items() if k in current}}
+        
         unknown = set(values) - set(current)
         if unknown:
             raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
+
         medium = merged["risk_medium_threshold"]
         high = merged["risk_high_threshold"]
         critical = merged["risk_critical_threshold"]
+
         if not 0 < medium < high < critical < 1:
             raise ValueError("Thresholds must satisfy 0 < medium < high < critical < 1")
         if merged["session_gap_tolerance_seconds"] <= 0:
             raise ValueError("Gap tolerance must be positive")
+
         with self.connect() as connection:
             for key, value in merged.items():
                 connection.execute("UPDATE settings SET value = ? WHERE key = ?", (value, key))

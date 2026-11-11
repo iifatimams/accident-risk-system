@@ -22,11 +22,11 @@ public class ObdBleClient: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     private let initCommands = [
         "ATZ\r",     // Reset adapter
         "ATE0\r",    // Echo off
-        "ATL0\r",    // Linefeeds off[cite: 1]
-        "ATS0\r",    // Spaces off[cite: 1]
-        "ATH0\r",    // Headers off[cite: 1]
-        "ATSP0\r",   // Auto protocol negotiation[cite: 1]
-        "0100\r"     // Test ECU link[cite: 1]
+        "ATL0\r",    // Linefeeds off
+        "ATS0\r",    // Spaces off
+        "ATH0\r",    // Headers off
+        "ATSP0\r",   // Auto protocol negotiation
+        "0100\r"     // Test ECU link
     ]
     private var initStep = 0
     private var handshakeStarted = false
@@ -34,7 +34,7 @@ public class ObdBleClient: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     private var isScanning = false
     private var isPollingActive = false
     
-    // Round-robin query cycle[cite: 1]
+    // Round-robin query cycle
     private let pids = ["010D\r", "010C\r", "0111\r", "0104\r"]
     private var currentPidIndex = 0
     
@@ -46,15 +46,18 @@ public class ObdBleClient: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     
     public override init() {
         super.init()
-        centralManager = CBCentralManager(
-            delegate: self,
-            queue: nil, // Run on Main queue to guarantee timely delegate execution
-            options: [CBCentralManagerOptionShowPowerAlertKey: true]
-        )
+        // FIX: DO NOT initialize CBCentralManager here to prevent main-thread deadlocks on app launch!
     }
     
     public func start() {
-        if centralManager.state == .poweredOn {
+        // FIX: Only initialize Bluetooth when the session actually starts
+        if centralManager == nil {
+            centralManager = CBCentralManager(
+                delegate: self,
+                queue: nil, // Run on Main queue to guarantee timely delegate execution
+                options: [CBCentralManagerOptionShowPowerAlertKey: true]
+            )
+        } else if centralManager.state == .poweredOn {
             startScanWithTimeout()
         }
     }
@@ -316,7 +319,7 @@ public class ObdBleClient: NSObject, CBCentralManagerDelegate, CBPeripheralDeleg
     
     public func stop() {
         scanTimeoutWorkItem?.cancel()
-        centralManager.stopScan()
+        centralManager?.stopScan()
         cleanup()
     }
 }

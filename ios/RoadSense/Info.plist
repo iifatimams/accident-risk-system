@@ -26,6 +26,8 @@
 	<string>RoadSense requires GPS during active drives</string>
 	<key>NSMotionUsageDescription</key>
 	<string>RoadSense monitors vehicle dynamics using phone motion sensors</string>
+	<key>NSCameraUsageDescription</key>
+	<string>RoadSense uses the front and rear cameras to detect driver distraction and road traffic</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

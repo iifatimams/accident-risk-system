@@ -20,12 +20,17 @@ public class WhoopClient: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
     
     public override init() {
         super.init()
-        centralManager = CBCentralManager(delegate: self, queue: nil)
+        // FIX: DO NOT initialize CBCentralManager here to prevent main-thread deadlocks on app launch!
     }
     
     public func startPolling() {
         guard !isStarted else { return }
         isStarted = true
+        
+        // FIX: Only initialize Bluetooth when the session actually starts
+        if centralManager == nil {
+            centralManager = CBCentralManager(delegate: self, queue: nil)
+        }
         
         DispatchQueue.main.async { [weak self] in
             self?.pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -160,9 +165,9 @@ public class WhoopClient: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
         isStarted = false
         pollTimer?.invalidate()
         pollTimer = nil
-        centralManager.stopScan()
+        centralManager?.stopScan()
         if let p = whoopPeripheral {
-            centralManager.cancelPeripheralConnection(p)
+            centralManager?.cancelPeripheralConnection(p)
             whoopPeripheral = nil
         }
     }
