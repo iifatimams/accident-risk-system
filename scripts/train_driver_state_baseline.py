@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import datasets
 from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
 
-DATA_ROOT = Path("/tmp/dmd_audit/driver_state_dataset")
+DATA_ROOT = Path(__file__).resolve().parent.parent / "data/interim/dmd_frames/driver_state_dataset"
 BATCH_SIZE = 32
 EPOCHS = 8
 LR = 1e-3
