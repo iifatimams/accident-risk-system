@@ -87,7 +87,7 @@ public struct LoginView: View {
                         .font(.largeTitle)
                         .fontWeight(.bold)
                     
-                    Text(auth.demoMode ? "Restricted university demo account" : "Sign in using an SMS verification code")
+                    Text("Sign in with a verification code")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -151,13 +151,11 @@ public struct LoginView: View {
                             .padding()
                             .background(Color(.secondarySystemBackground))
                             .cornerRadius(12)
-                        
-                        if let hint = auth.devCodeHint {
-                            Text(hint)
-                                .font(.caption)
-                                .foregroundColor(.blue)
-                        }
-                        
+
+                        Text("Ask the backend operator for this code.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
                         if let error = auth.errorMessage {
                             Text(error)
                                 .font(.caption)
@@ -480,8 +478,6 @@ public struct ServerSettingsView: View {
     @ObservedObject private var auth = AuthManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var endpoint = ""
-    @State private var demoMode = false
-    @State private var pairingKey = ""
 
     public var body: some View {
         NavigationStack {
@@ -492,20 +488,9 @@ public struct ServerSettingsView: View {
                     Text("For different Wi-Fi or mobile data, use your current HTTPS tunnel. localhost refers to the iPhone, not your Mac. Changing servers signs you out.")
                         .font(.caption)
                 }
-                Section("University demo") {
-                    Toggle("Restricted demo login", isOn: $demoMode)
-                    if demoMode {
-                        SecureField("Private pairing key from backend operator", text: $pairingKey)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        Text("Use test accounts on the separate demo server. The pairing key authorizes code display and is kept only until this app closes. Never share it publicly.")
-                            .font(.caption)
-                    }
-                }
                 Section {
                     Button("Save & Test Connection") {
                         if auth.saveEndpoint(endpoint) {
-                            auth.demoMode = demoMode
-                            auth.demoKey = demoMode ? pairingKey.trimmingCharacters(in: .whitespacesAndNewlines) : ""
                             Task { await auth.testConnection() }
                         }
                     }
@@ -519,8 +504,6 @@ public struct ServerSettingsView: View {
             .toolbar { Button("Done") { dismiss() }.disabled(auth.isLoading) }
             .onAppear {
                 endpoint = auth.baseUrl
-                demoMode = auth.demoMode
-                pairingKey = auth.demoKey
             }
         }
     }

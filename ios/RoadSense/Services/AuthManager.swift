@@ -12,12 +12,8 @@ public class AuthManager: ObservableObject {
     @Published public var isCodeSent = false
     @Published public var errorMessage: String?
     @Published public private(set) var isLoading = false
-    @Published public private(set) var devCodeHint: String?
     @Published public private(set) var connectionMessage: String?
     @Published public private(set) var baseUrl: String
-    // Pairing credential is intentionally memory-only and never logged or saved in preferences.
-    @Published public var demoKey = ""
-    @Published public var demoMode = false
     private let defaults: UserDefaults
     private let api: RoadSenseAPI
     private var generation = 0
@@ -46,8 +42,6 @@ public class AuthManager: ObservableObject {
             let normalized = try ServerConfig.normalize(value)
             if normalized != baseUrl {
                 signOut()
-                demoKey = ""
-                demoMode = false
                 baseUrl = normalized
                 defaults.set(normalized, forKey: "roadsense_server_url")
             }
@@ -68,34 +62,26 @@ public class AuthManager: ObservableObject {
             let result: ConnectionResponse = try await api.request(base: baseUrl, path: "/app/api/connection")
             guard attempt == generation else { return }
             guard result.service == "roadsense", result.api_version == 1 else { throw APIError.invalidResponse }
-            connectionMessage = "Connected to RoadSense at \(baseUrl). \(result.demo_mode ? "Restricted demo server." : "SMS login server.")"
+            connectionMessage = "Connected to RoadSense at \(baseUrl)."
         } catch { if attempt == generation { errorMessage = error.localizedDescription } }
     }
 
+    /// Requests a verification code. The server never returns the code
+    /// itself here -- the code is read from the Mac-local operator console
+    /// (started alongside the backend by `python scripts/serve.py`), never
+    /// from this app.
     public func requestCode(phone: String) async {
         guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
-        devCodeHint = nil
         isCodeSent = false
         let attempt = generation
         defer { isLoading = false }
         do {
-            if demoMode && demoKey.count < 32 {
-                throw APIError.message("Enter the private demo pairing key in Settings. Ask the backend operator for it.")
-            }
             let result: CodeResponse = try await api.request(
-                base: baseUrl, path: "/app/api/auth/request-code", method: "POST", body: ["phone": phone],
-                demoKey: demoMode ? demoKey : nil)
+                base: baseUrl, path: "/app/api/auth/request-code", method: "POST", body: ["phone": phone])
             guard attempt == generation else { return }
-            guard result.sent, result.expires_in > 0 else { throw APIError.invalidResponse }
-            if result.delivery == "demo" {
-                guard demoMode, let code = result.code, code.count == 6,
-                      code.allSatisfy({ "0123456789".contains($0) }) else { throw APIError.invalidResponse }
-                devCodeHint = "DEMO ONLY — Code: \(code)"
-            } else {
-                guard result.delivery == "sms", result.code == nil else { throw APIError.invalidResponse }
-            }
+            guard result.expires_in > 0 else { throw APIError.invalidResponse }
             requestedPhone = phone
             isCodeSent = true
         } catch { if attempt == generation { errorMessage = error.localizedDescription } }
@@ -117,7 +103,6 @@ public class AuthManager: ObservableObject {
             token = result.token
             defaults.set(result.token, forKey: "roadsense_auth_token")
             defaults.set(baseUrl, forKey: "roadsense_token_endpoint")
-            devCodeHint = nil
             // The code has been consumed. A failed profile load is retried with the token.
             isCodeSent = false
             return await loadProfile(attempt: attempt)
@@ -202,7 +187,6 @@ public class AuthManager: ObservableObject {
         assignedWhoopId = nil
         isCodeSent = false
         requestedPhone = nil
-        devCodeHint = nil
         errorMessage = nil
         defaults.removeObject(forKey: "roadsense_auth_token")
         defaults.removeObject(forKey: "roadsense_token_endpoint")

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -66,11 +66,13 @@ class EnvironmentSettings(BaseSettings):
     database: Path = Path("data/app.sqlite3")
     bootstrap_admin_phone: str | None = None
     bootstrap_admin_name: str = "Administrator"
-    # Demo delivery is disabled unless a private pairing key and test identities
-    # are also configured. Never point a demo server at a participant database.
-    dev_mock_sms_delivery: bool = False
-    demo_access_key: SecretStr | None = None
-    demo_phone_numbers: list[str] = Field(default_factory=list)
+    # The Mac-local operator console (api/operator.py, started by
+    # scripts/serve.py) binds loopback-only on this port -- never tunneled
+    # by ngrok, since ngrok is only ever pointed at the main app's port.
+    operator_port: int = 8787
+    # How often the SAME phone number may request a new code, in seconds --
+    # basic abuse/spam throttling on the public request-code endpoint.
+    code_request_min_interval_seconds: float = 5.0
 
 
 def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
