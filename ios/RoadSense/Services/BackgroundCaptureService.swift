@@ -1050,7 +1050,11 @@ public class BackgroundCaptureService:
       self.lastSpeedSource = speedSource
       self.lastTime = now
       // MARK: On-Device Core ML Prediction
-      let risk = self.edgeML.predictRisk(
+      // Phase 9.1: predictRiskBreakdown (not predictRisk) so the
+      // interpretable components -- raw ML fusion vs. each hand-authored
+      // heuristic adjustment -- are available to send to the dashboard,
+      // not just the final opaque number. See RiskFusionHeuristics.swift.
+      let breakdown = self.edgeML.predictRiskBreakdown(
         effectiveAccel: snapshot.accelMag ?? 9.80665,
         gyroMag: snapshot.gyroMag ?? 0.0,
         speedKmh: speedKmh,
@@ -1074,9 +1078,28 @@ public class BackgroundCaptureService:
           ContextManager.shared.designSpeed,
         isDriving: riskActive
       )
+      let risk = breakdown.total
       // MARK: Server Payload
       var payload = snapshot.toDictionary()
       payload["risk_active"] = riskActive
+      // Dashboard-only explainability, same status as camera_status/debug_*
+      // elsewhere in this payload -- NOT part of the validated SensorFrame
+      // schema, and the index itself remains experimental/uncalibrated
+      // regardless of how it's broken down (see RiskFusionHeuristics.swift).
+      if riskActive {
+        payload["risk_breakdown"] = [
+          "ml_fusion_base": breakdown.mlFusionBase,
+          "jerk_boost": breakdown.jerkBoost,
+          "hr_velocity_boost": breakdown.hrVelocityBoost,
+          "traffic_context": breakdown.trafficContext,
+          "pedestrian_context": breakdown.pedestrianContext,
+          "eyes_closed_penalty": breakdown.eyesClosedPenalty,
+          "attention_penalty": breakdown.attentionPenalty,
+          "lead_closing_hard_boost": breakdown.leadClosingHardBoost,
+          "false_positive_suppression_applied": breakdown.falsePositiveSuppressionApplied,
+          "hard_override_applied": breakdown.hardOverrideApplied,
+        ]
+      }
       // Inactive driving is not a low risk score.
       // Use JSON null to represent no prediction.
       if riskActive {
