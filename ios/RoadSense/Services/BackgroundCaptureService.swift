@@ -27,6 +27,9 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   // this layer.
   @Published public var leadTrack: TrackedObject?
   private var vehicleTracker = ObjectTracker()
+  // MARK: Pedestrian Hazard (Phase 7)
+  @Published public var pedestrianHazardState: PedestrianHazardState = .insufficientEvidence
+  private var pedestrianTracker = ObjectTracker()
   // Raw diagnostic values. These exist so the thresholds below can be
   // calibrated against real readings (phone mount angle, lighting) instead
   // of guessed blind. Watch these on the dashboard while driving/parked.
@@ -224,6 +227,7 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     frontFrameTimestamps.removeAll()
     backFrameTimestamps.removeAll()
     vehicleTracker = ObjectTracker()
+    pedestrianTracker = ObjectTracker()
     Task { @MainActor in
       self.eyesOnRoad = true
       self.attentionState = .attentive
@@ -236,6 +240,7 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       self.sluggishGaze = false
       self.pedestriansDetected = false
       self.pedestrianCount = 0
+      self.pedestrianHazardState = .insufficientEvidence
       self.cameraStatus = "idle"
       self.frontDeliveredFps = 0.0
       self.backDeliveredFps = 0.0
@@ -654,6 +659,26 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       Task { @MainActor in
         self.pedestrianCount = people.count
         self.pedestriansDetected = !people.isEmpty
+        // Phase 7: track real pedestrian detections (unlike the vehicle
+        // rectangle heuristic above, VNDetectHumanRectanglesRequest IS a
+        // validated Apple-trained detector) and classify the single most
+        // severe tracked pedestrian's hazard state.
+        let detections = people.map {
+          Detection(
+            classLabel: "person",
+            box: NormalizedRect(
+              x: $0.boundingBox.origin.x, y: $0.boundingBox.origin.y,
+              width: $0.boundingBox.width, height: $0.boundingBox.height
+            ),
+            confidence: $0.confidence
+          )
+        }
+        let tracks = self.pedestrianTracker.update(
+          detections: detections, at: Date().timeIntervalSince1970
+        )
+        self.pedestrianHazardState = tracks
+          .map { classifyPedestrianHazard(track: $0) }
+          .max { $0.severityRank < $1.severityRank } ?? .insufficientEvidence
       }
     }
     // upperBodyOnly defaults to true (torso-only boxes); pedestrians seen
@@ -904,6 +929,8 @@ public class BackgroundCaptureService:
           self.visionManager.pedestriansDetected
         snapshot.pedestrianCount =
           self.visionManager.pedestrianCount
+        snapshot.pedestrianHazardState =
+          self.visionManager.pedestrianHazardState.payloadValue
         snapshot.cameraStatus =
           self.visionManager.cameraStatus
         snapshot.debugFaceDetected =

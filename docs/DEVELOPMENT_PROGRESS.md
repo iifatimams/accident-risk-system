@@ -611,10 +611,52 @@ Verification: `xcodebuild` (Debug/iphonesimulator): **BUILD SUCCEEDED**.
 `.venv/bin/python -m pytest -q`: **172 passed** (1 new). No Android,
 `data/raw`, or real-database changes.
 
-## Phases 7-19
+## Phase 7 -- Pedestrian collision-risk estimation: IMPLEMENTED
 
-Not started. Phase 7 (pedestrian collision-risk estimation) is a natural
-next step given the real `VNDetectHumanRectanglesRequest` pedestrian
-detector already in use (unlike vehicles, this one IS a validated Apple
-detector, not a heuristic) and the tracker/hazard infrastructure just
-built above, which Phase 7 can reuse directly.
+Added `ios/RoadSense/Services/PedestrianHazard.swift`, reusing the Phase 5
+tracker but over the REAL `VNDetectHumanRectanglesRequest` detections
+(unlike the vehicle rectangle heuristic feeding Phase 6, this one IS a
+validated Apple-trained detector -- stated explicitly in the module's doc
+comment so the two are never confused). Classifies each tracked
+pedestrian from position + lateral motion alone (deliberately NOT gated
+on ego speed, unlike Phase 6 -- there is no equivalent image-growth
+artifact to guard against here) into exactly the distinctions the
+directive asked for: `roadsideVisible` (stationary, outside the forward
+corridor), `inOrNearPath` (currently within it), `movingAcrossScene`
+(moving, but away from the corridor), `enteringConflictZone` (moving
+toward it), `insufficientEvidence` (too little tracked history). Per
+"visibility alone is not an imminent collision" and "do not treat every
+visible pedestrian as a major risk spike": the two common, unalarming
+states are the default outcome, and the two conflict-relevant states
+require actual directional motion evidence, never firing just because
+someone is in frame.
+
+Wired into `BackgroundCaptureService.processRoadTraffic` alongside the
+existing pedestrian detection: when multiple pedestrians are tracked at
+once, the published `pedestrianHazardState` is the MOST SEVERE of them
+(ranked insufficientEvidence < roadsideVisible < movingAcrossScene <
+inOrNearPath < enteringConflictZone), so one person entering the path
+is never masked by several others standing safely at the roadside.
+Rounds-trips to the backend dashboard (`cv_pedestrian_hazard_state`),
+same pattern as Phases 2 and 6.
+
+7 new Swift tests: insufficient history, a stationary roadside
+pedestrian, a pedestrian already inside the corridor, walking toward the
+corridor from BOTH sides (left-to-right and right-to-left), walking away
+from it, and the severity ordering used for aggregation.
+
+What's NOT done: no real driving footage with labeled pedestrian-conflict
+events exists in this environment to validate this against (same honest
+limitation as Phase 6); "vehicle stopped vs moving" context (directive's
+own text) was deliberately NOT added as a gate, since pedestrian path
+conflict is a real risk regardless of whether the ego vehicle is
+currently moving -- unlike Phase 6's speed gate, which exists specifically
+to suppress an image-growth artifact that only appears while driving.
+
+Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **60
+passed** (7 new). `pytest`: **173 passed** (1 new). No Android, `data/raw`,
+or real-database changes.
+
+## Phases 8-19
+
+Not started.
