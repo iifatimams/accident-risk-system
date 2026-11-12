@@ -1094,27 +1094,35 @@ public class BackgroundCaptureService:
     }
   }
 
+  // AuthManager.token is @MainActor-isolated. This used to be read with
+  // `DispatchQueue.main.sync { AuthManager.shared.token }`, which deadlocks
+  // the instant the CALLER is already on the main thread -- exactly what
+  // confirmSuspectedCollision/dismissSuspectedCollision below do, since
+  // they're invoked directly from SwiftUI button actions (see
+  // ContentView.swift's onConfirm/onDismiss closures). Tapping Confirm or
+  // Dismiss on an already-uploaded incident would hang the entire UI
+  // forever. `Task { await ... }` never blocks the calling thread, however
+  // it's called from, so this is safe regardless of caller.
   private func syncDecision(alertId: Int, action: String, incidentId: String) {
-    // AuthManager is @MainActor; this method is called from a background
-    // queue, so the token is read via a synchronous hop rather than
-    // referenced directly from this nonisolated context.
-    let token = DispatchQueue.main.sync { AuthManager.shared.token }
-    guard let token = token,
-      let url = URL(string: "\(self.serverUrl)/app/api/alerts/\(alertId)/\(action)")
-    else {
+    guard let url = URL(string: "\(self.serverUrl)/app/api/alerts/\(alertId)/\(action)") else {
       return
     }
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-    URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-      guard let self = self, error == nil,
-        let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode)
-      else {
-        return  // left un-synced; retried next cycle
+    Task {
+      guard let token = await AuthManager.shared.token else {
+        return
       }
-      self.incidentStore.markDecisionSynced(id: incidentId)
-    }.resume()
+      var request = URLRequest(url: url)
+      request.httpMethod = "POST"
+      request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+        guard let self = self, error == nil,
+          let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode)
+        else {
+          return  // left un-synced; retried next cycle
+        }
+        self.incidentStore.markDecisionSynced(id: incidentId)
+      }.resume()
+    }
   }
 
   /// Driver confirms a suspected collision. Updates local storage

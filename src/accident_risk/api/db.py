@@ -241,10 +241,27 @@ class Database:
         with self.connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA)
+            self._migrate(connection)
             for key, value in DEFAULT_SETTINGS.items():
                 connection.execute(
                     "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (key, value)
                 )
+
+    def _migrate(self, connection: sqlite3.Connection) -> None:
+        """Idempotent column migrations for databases created before a column
+        existed. `CREATE TABLE IF NOT EXISTS` in SCHEMA above does nothing to
+        an alerts table that already exists without detail_json -- added
+        later, after the independent collision-detector lifecycle needed
+        somewhere to store its fields. Safe to run on every startup: a
+        database already at the current schema sees no missing columns and
+        this is a no-op."""
+        existing_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(alerts)")
+        }
+        if "detail_json" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE alerts ADD COLUMN detail_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     # ---------------------------------------------------------------- users
 
