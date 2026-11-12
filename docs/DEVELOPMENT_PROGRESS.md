@@ -181,6 +181,93 @@ Verification performed this session:
   of being silently dropped).
 - No Android, `data/raw`, or dataset changes.
 
+## Synthetic driving fixture integration (RoadSense_Synthetic_Driving_Scenarios_v1)
+
+Not a numbered phase in the directive, but directly serves Phase 8's "keep
+real and synthetic data separate" requirement and gives Phases 6/7/11/12
+something concrete to test against before SUMO/CARLA exists. Done this
+session, ahead of Phase 3, at the user's request.
+
+The user supplied `RoadSense_Synthetic_Driving_Scenarios_v1.zip`: 10
+deterministic 40-second/401-frame scenarios (normal cruise, gentle brake,
+roundabout, stopped pedestrian, safe/near-miss/collision lead-vehicle
+following, pedestrian-crossing near-miss/collision, GPS/OBD dropout) with
+separate ground-truth CSVs. Its own README and manifest already state the
+same constraints as this project's AGENTS.md (synthetic-only, no real
+routes, not evidence of model accuracy, not for training without
+independent validation, not for real alert delivery) -- it was generated
+for exactly this project.
+
+What was done:
+
+1. **Validated independently before trusting it.** Running the package's own
+   bundled `validate.py` was not permitted in this sandboxed session (it is
+   external, unreviewed code); instead wrote a separate script that loads
+   every one of the 4,010 frames through the REAL
+   `accident_risk.schemas.SensorFrame` pydantic model (not a copy, not a
+   mock) and confirmed: all validate cleanly, no ground-truth column
+   (`event_in_next_5s`, `contact_now`, the `*_truth` distances) exists in
+   the schema at all, no physiology fields are fabricated, timestamps are
+   strictly 0.1s apart, and the two collision scenarios have exactly one
+   `contact_now` tick (at 28.0s) and exactly 50 `event_in_next_5s` positives
+   (the preceding 5 seconds at 10Hz) -- matching the package's own claims.
+2. **Committed the fixture into `tests/fixtures/roadsense_synthetic_v1/`**
+   verbatim (unmodified from the supplied zip), clearly separated from
+   `data/raw` (real participant data, never touched) and from
+   `data/processed`/`data/interim`.
+3. **Added `tests/synthetic_fixtures.py`**: a small loader (`load_scenario`,
+   `iter_scenarios`) that returns `SensorFrame` objects and ground-truth
+   label dicts as two SEPARATE collections -- mirroring the package's own
+   design intent that labels must never leak into model input.
+4. **Added `tests/test_synthetic_fixtures.py`** (35 tests), covering every
+   point the user asked for:
+   - Schema validity + no leaked ground truth (all 10 scenarios).
+   - Hard negatives (normal cruise, gentle brake, roundabout, stopped
+     pedestrian, safe following, GPS/OBD dropout) AND both near-miss
+     scenarios never trigger the independent kinematic collision detector.
+   - Both collision scenarios trigger the detector at EXACTLY the labeled
+     28.0s contact tick and nowhere else in the other 400 frames.
+   - The 5-second event-label window is exactly the 50 ticks before
+     impact, and is False at and after the impact tick itself.
+   - All 10 scenarios replay through the real `ReplaySource` +
+     `InferenceEngine` pipeline without crashing, including
+     `gps_obd_dropout`'s missing-GPS/OBD stretches (AGENTS.md: "missing
+     sensors must not crash inference").
+   - A synthetic collision frame posted through the real `/ingest` HTTP
+     path, against an isolated `tmp_path` database (never the real
+     `data/app.sqlite3`, never a running production/ngrok instance),
+     confirms the app's notification sender stays the existing
+     `MockNotificationSender` -- there is currently no real notification
+     provider wired in at all (per the 2026-11-12 checkpoint), so no
+     simulated event can reach a real family contact today, and this test
+     guards against that silently changing later.
+
+What this does NOT establish, stated per AGENTS.md's instruction that
+synthetic fixtures are software tests, never evidence of model
+performance: no trained production model was loaded or evaluated against
+this data (the pipeline test uses a bare `InferenceEngine()`, same as this
+repo's existing convention, so `overall_risk_index` stays `None`
+throughout); the "risk-score false positive" requirement is satisfied here
+as a pipeline-crash/abstention regression guard, not a claim about a real
+risk model's false-positive rate, since no trained model exists to
+evaluate.
+
+Verification: `.venv/bin/python -m pytest -q`: **164 passed** (129 before
+this work, 35 new). No Android, `data/raw`, or real-dataset changes.
+
 ## Phases 3-19
 
-Not started.
+Not started, except the synthetic-fixture work above (user-requested,
+done ahead of Phase 3). Explicitly deferred this session, per the user's
+own request to extend toward them next:
+
+- **SUMO/CARLA UAE OpenStreetMap simulation (Phase 8.1-8.3)**: substantial
+  new infrastructure (simulator install, OSM road-network import, scenario
+  authoring) -- not attempted. Needs a scoping decision (SUMO vs CARLA,
+  hardware requirements) before implementation, per the directive's own
+  instruction not to install a heavy simulator without first documenting
+  requirements.
+- **Real labeled BDD100K/DMD image evaluation (Phase 3/4)**: requires
+  auditing what's actually downloaded/available locally first (the
+  directive is explicit: do not assume a benchmark script means a dataset
+  is present) -- not attempted this session.
