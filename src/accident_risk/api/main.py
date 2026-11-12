@@ -79,8 +79,16 @@ def bootstrap_administrator(database: Database, env: EnvironmentSettings) -> Non
 
 
 def create_app(
-    engine: InferenceEngine | None = None, database_path: Path | str | None = None
+    engine: InferenceEngine | None = None,
+    database_path: Path | str | None = None,
+    dev_mock_sms_delivery: bool | None = None,
 ) -> FastAPI:
+    """dev_mock_sms_delivery: explicit, call-site-visible override for
+    AuthService's dev-only mock SMS delivery (see auth.py). None (the
+    default) defers to ACCIDENT_RISK_DEV_MOCK_SMS_DELIVERY, itself False
+    unless set -- so a plain create_app() call is secure by default; passing
+    True must be a deliberate choice by the caller (e.g. an automated test),
+    never an ambient environment setting someone forgot was on."""
     env = EnvironmentSettings()
     if engine is None:
         config = load_config(env.config) if env.config.exists() else {}
@@ -111,7 +119,12 @@ def create_app(
     application.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     database = Database(database_path if database_path is not None else env.database)
-    auth = AuthService(database, expose_codes=env.expose_login_codes)
+    auth = AuthService(
+        database,
+        dev_mock_sms_delivery=(
+            env.dev_mock_sms_delivery if dev_mock_sms_delivery is None else dev_mock_sms_delivery
+        ),
+    )
     recorder = SessionRecorder(database)
     bootstrap_administrator(database, env)
 
@@ -167,7 +180,7 @@ def create_app(
                 # An inactive/unknown edge risk is NOT a LOW probability.
                 engine.latest.pop(target_stream, None)
                 engine.latest.pop(frame.stream_id, None)
-                recorder.observe(frame, None)
+                recorder.observe(frame, None, ui_state.get(frame.stream_id))
                 return None
             if direct_risk is not None:
                 risk_level = risk_level_for(direct_risk, database.get_settings())
@@ -186,7 +199,7 @@ def create_app(
 
             try:
                 if prediction is not None:
-                    recorder.observe(frame, prediction)
+                    recorder.observe(frame, prediction, ui_state.get(frame.stream_id))
             except (ValueError, TypeError, RuntimeError, OSError) as exc:
                 logging.getLogger("accident_risk").warning("Session recording failed: %s", exc)
 
@@ -323,6 +336,25 @@ def create_app(
                 "risk_index": prediction.overall_risk_index if prediction else direct_risk,
             }
 
+    @application.post("/session/stop")
+    def stop_global_session() -> dict[str, bool]:
+        """Global ingestion halt (distinct from a per-driver /app/api session):
+        new frames are refused with 409 until /session/start. Also clears
+        cached per-stream state so a resumed /api/v1/predict/live read doesn't
+        show data from before the stop."""
+        with lock:
+            application.state.active = False
+            engine.pipeline.synchronizer.values.clear()
+            engine.pipeline.synchronizer.last.clear()
+            engine.latest.clear()
+        return {"active": False}
+
+    @application.post("/session/start")
+    def start_global_session() -> dict[str, bool]:
+        with lock:
+            application.state.active = True
+        return {"active": True}
+
     @application.get("/api/v1/predict/live")
     def live_dashboard(stream_id: str | None = Query(None)) -> dict:
         with lock:
@@ -423,4 +455,13 @@ def create_app(
 
     return application
 
-app = create_app()
+
+def __getattr__(name: str):
+    """Lazily build the production ASGI app (uvicorn's `main:app` target) only
+    when something actually accesses `main.app` -- not merely on import. Every
+    test file imports `create_app` from this module; an eager `app =
+    create_app()` here would open the real database (env.database, normally
+    data/app.sqlite3) as a side effect of that import alone."""
+    if name == "app":
+        return create_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

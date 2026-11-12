@@ -19,8 +19,10 @@ from accident_risk.api.main import create_app
 from accident_risk.inference.engine import InferenceEngine
 
 
-def test_api(models):
-    with TestClient(create_app(InferenceEngine(*models))) as client:
+def test_api(models, tmp_path):
+    with TestClient(
+        create_app(InferenceEngine(*models), database_path=tmp_path / "test_api.sqlite3")
+    ) as client:
         dashboard = client.get("/")
         assert dashboard.status_code == 200
         assert "RoadSense" in dashboard.text

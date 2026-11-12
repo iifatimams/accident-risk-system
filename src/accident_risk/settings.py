@@ -66,7 +66,13 @@ class EnvironmentSettings(BaseSettings):
     database: Path = Path("data/app.sqlite3")
     bootstrap_admin_phone: str | None = None
     bootstrap_admin_name: str = "Administrator"
-    expose_login_codes: bool = True
+    # Default OFF: a verification code must never be handed back to an
+    # unauthenticated caller in normal operation, including for an EXISTING
+    # account -- anyone who merely knows a registered phone number must not
+    # be able to fetch that account's login code this way. Only set
+    # ACCIDENT_RISK_DEV_MOCK_SMS_DELIVERY=true for a local, offline,
+    # no-real-users demonstration where no real Twilio delivery exists.
+    dev_mock_sms_delivery: bool = False
 
 
 def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

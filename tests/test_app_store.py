@@ -15,7 +15,11 @@ def db(tmp_path):
 
 @pytest.fixture
 def auth(db):
-    return AuthService(db)
+    # Explicit test-only opt-in (never the default -- see auth.py). Proving
+    # test_unregistered_number_does_not_leak still holds with this ON is a
+    # stronger check: the pre-existing-identity gate is what protects an
+    # unregistered number, not merely this flag being off.
+    return AuthService(db, dev_mock_sms_delivery=True)
 
 
 @pytest.fixture
@@ -68,6 +72,14 @@ def test_login_round_trip(auth, people):
 
 def test_unregistered_number_does_not_leak(auth, people):
     assert "code" not in auth.request_code("+971509999999")
+
+
+def test_existing_account_code_is_not_leaked_by_default(db, people):
+    """The exact unauthorized-login vector: merely knowing a REGISTERED
+    phone number must not be enough to fetch that account's login code,
+    under the default (no explicit dev_mock_sms_delivery) configuration."""
+    default_auth = AuthService(db)
+    assert "code" not in default_auth.request_code("+971501110001")
 
 
 def test_code_is_single_use(auth, people):

@@ -1,10 +1,14 @@
 """Product API behind the operator and driver interface. Mounted at /app/api."""
 
+import csv
+import hashlib
+import io
+import json
 import time
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from accident_risk.api.auth import AuthError, AuthService, Principal, bearer_from_header
@@ -59,6 +63,10 @@ class CollisionRequest(BaseModel):
     longitude: float | None = None
 
 
+class ResearchConsentRequest(BaseModel):
+    granted: bool
+
+
 class DriverRequest(BaseModel):
     phone: str = Field(min_length=3, max_length=30)
     name: str = Field(min_length=1, max_length=120)
@@ -105,6 +113,52 @@ def risk_level_for(index: float | None, thresholds: dict[str, float]) -> str | N
     if index >= thresholds["risk_medium_threshold"]:
         return "MEDIUM"
     return "LOW"
+
+
+# Research export (recording/export milestone). Keep in sync with the fields
+# SessionRecorder._add_research_sample actually writes.
+EXPORT_COLUMNS = (
+    "ts", "pseudonymous_participant_id", "session_id", "device_id", "source",
+    "speed_kmh", "rpm", "throttle_position", "engine_load", "steering_angle",
+    "tire_pressure_fl", "tire_pressure_fr", "tire_pressure_rl", "tire_pressure_rr",
+    "accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z",
+    "gps_latitude", "gps_longitude", "gps_heading", "is_roundabout",
+    "heart_rate", "spo2", "hrv_rmssd", "rr_interval_ms", "physiology_signal_quality",
+    "eyes_on_road", "eyes_closed_sec", "traffic_level", "pedestrians_detected",
+    "pedestrian_count", "lead_closing_fast",
+    "event_detection_score", "vehicle_risk_score", "driver_state_risk",
+    "overall_risk_index", "risk_level", "data_quality", "model_version",
+    "quality_flags", "sensor_age_seconds", "inference_latency_ms", "warning_fired",
+    "sensor_timestamps",
+)
+
+
+def pseudonymize_participant(user_id: int) -> str:
+    """Stable, one-way per-participant id for research export -- never the raw
+    user_id, name, or phone number. A fixed per-deployment string salt, not a
+    cryptographic secret: good enough to avoid exporting a directly-identifying
+    field, not a claim of formal anonymity."""
+    digest = hashlib.sha256(f"roadsense-research-export:{user_id}".encode()).hexdigest()[:10]
+    return f"P-{digest}"
+
+
+def build_export_rows(
+    session: dict[str, Any], samples: list[dict[str, Any]], include_location: bool
+) -> list[dict[str, Any]]:
+    """Flatten research samples for export: pseudonymous id (no name/phone),
+    precise GPS blanked unless include_location, missing readings stay null
+    rather than becoming zero, original per-sensor timestamps preserved."""
+    pseudonym = pseudonymize_participant(session["user_id"])
+    rows = []
+    for sample in samples:
+        row = {column: sample.get(column) for column in EXPORT_COLUMNS}
+        row["pseudonymous_participant_id"] = pseudonym
+        row["session_id"] = session["id"]
+        if not include_location:
+            row["gps_latitude"] = None
+            row["gps_longitude"] = None
+        rows.append(row)
+    return rows
 
 
 def create_router(
@@ -266,6 +320,19 @@ def create_router(
             "models_loaded": len(engine.models),
         }
 
+    @router.get("/driver/research-consent")
+    def get_research_consent(principal: Principal = any_user) -> dict[str, Any]:
+        """Always the caller's OWN consent -- never settable or readable on
+        someone else's behalf, and independent of family-monitoring consent."""
+        return database.get_research_consent(principal.user_id)
+
+    @router.post("/driver/research-consent")
+    def set_research_consent(
+        payload: ResearchConsentRequest, principal: Principal = any_user
+    ) -> dict[str, Any]:
+        database.log_access(principal.user_id, principal.role, "research-consent")
+        return database.set_research_consent(principal.user_id, payload.granted)
+
     @router.post("/driver/session/start")
     def start_session(payload: StartSessionRequest, principal: Principal = any_user) -> dict[str, Any]:
         existing = database.active_session(principal.user_id)
@@ -351,6 +418,57 @@ def create_router(
             "points": database.session_points(session_id),
             "gaps": database.session_gaps(session_id),
         }
+
+    def _prepare_export(
+        session_id: int, principal: Principal, include_location: bool
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        session = visible_session(session_id, principal)
+        if include_location and not role_allows(principal.role, "account_manager"):
+            raise HTTPException(403, "Precise location requires account_manager role or higher")
+        # Consent gates export regardless of who is asking or what role they
+        # hold -- a manager cannot export a participant's research data just
+        # because they're allowed to SEE the session.
+        if not database.get_research_consent(session["user_id"])["granted"]:
+            raise HTTPException(403, "This participant has not granted research consent")
+        rows = build_export_rows(session, database.session_samples(session_id), include_location)
+        database.log_access(principal.user_id, principal.role, f"session:{session_id}:export")
+        return session, rows
+
+    @router.get("/sessions/{session_id}/export.json")
+    def export_session_json(
+        session_id: int,
+        principal: Principal = any_user,
+        include_location: bool = Query(False, description="Include precise GPS; requires account_manager+"),
+    ) -> dict[str, Any]:
+        session, rows = _prepare_export(session_id, principal, include_location)
+        return {
+            "pseudonymous_participant_id": pseudonymize_participant(session["user_id"]),
+            "session_id": session_id,
+            "includes_precise_location": include_location,
+            "rows": rows,
+        }
+
+    @router.get("/sessions/{session_id}/export.csv")
+    def export_session_csv(
+        session_id: int,
+        principal: Principal = any_user,
+        include_location: bool = Query(False, description="Include precise GPS; requires account_manager+"),
+    ) -> Response:
+        _, rows = _prepare_export(session_id, principal, include_location)
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=EXPORT_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            flat = dict(row)
+            for key in ("quality_flags", "sensor_age_seconds", "sensor_timestamps"):
+                if flat.get(key) is not None:
+                    flat[key] = json.dumps(flat[key])
+            writer.writerow(flat)
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="session_{session_id}_research_export.csv"'},
+        )
 
     @router.get("/live")
     def live(principal: Principal = manager) -> dict[str, Any]:
