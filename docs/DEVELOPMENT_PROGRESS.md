@@ -367,6 +367,73 @@ What's NOT done:
 Verification: scripts ran to completion with real data (see results doc);
 `.venv/bin/python -m pytest -q`: still **164 passed** (unaffected).
 
+## Checkpoint resume tasks (docs/DEVELOPMENT_CHECKPOINT_2026-11-12.md): #1 and #2
+
+The 2026-11-12 checkpoint listed 8 resume tasks in priority order, written
+before this session's Phase 1-4 work started. Picked back up now that
+those phases have tested milestones of their own.
+
+### #1: `syncDecision` main-thread deadlock -- FIXED
+
+Confirmed the exact bug the checkpoint described: `syncDecision` read
+`AuthManager.shared.token` (an `@MainActor`-isolated property) via
+`DispatchQueue.main.sync { ... }`. `confirmSuspectedCollision` and
+`dismissSuspectedCollision` call `syncDecision` directly (not via
+`syncQueue.async`), and `ContentView.swift`'s `onConfirm`/`onDismiss`
+closures call those directly from SwiftUI button actions -- i.e. from the
+main thread. `DispatchQueue.main.sync` from the main thread is a
+guaranteed GCD deadlock: tapping Confirm or Dismiss on an incident that
+had already uploaded (`serverAlertId` set) would hang the entire UI
+forever, every time, not intermittently.
+
+Fixed by wrapping the network call in `Task { await AuthManager.shared.token ... }`
+instead -- `Task` never blocks the calling thread regardless of which
+thread calls `syncDecision`, so this is safe both from the UI (confirm/
+dismiss) and from the background retry timer.
+
+**Not covered by an automated regression test**: `BackgroundCaptureService`
+imports `UIKit`/`AVFoundation` and cannot be part of the `swift test`-able
+`RoadSenseAuth` target (see Phase 1's notes on why), and a real deadlock
+test would need to actually run the UI on a device/simulator. Verified by
+code inspection (confirmed the exact call chain above) and a successful
+`xcodebuild` compile. A device-level regression test belongs in Phase 18
+(final native iOS test matrix: "tap Confirm on an incident, confirm the
+UI does not freeze").
+
+### #2: SQLite `alerts.detail_json` migration -- FIXED
+
+Confirmed the bug: `CREATE TABLE IF NOT EXISTS alerts (...)` in `db.py`'s
+`SCHEMA` does nothing to a database that already has an `alerts` table
+without `detail_json` (added later, after the independent
+collision-detector lifecycle needed somewhere to store its fields) --
+such a database would hit "no such column: detail_json" on every alert
+read/write. Added `Database._migrate()`, run once at startup right after
+`executescript(SCHEMA)`: checks `PRAGMA table_info(alerts)` and runs
+`ALTER TABLE alerts ADD COLUMN detail_json TEXT NOT NULL DEFAULT '{}'`
+only if the column is actually missing -- idempotent, and a true no-op on
+an already-current schema (both are tested, see below).
+
+Tested against a synthetic pre-migration database built by hand in
+`tests/test_db_migration.py` (manually `CREATE TABLE`, no `detail_json`,
+two rows already in it) -- NEVER the real `data/app.sqlite3`, per the
+checkpoint's own instruction. Confirms: the column gets added, both
+pre-existing rows survive with `detail_json='{}'` (not NULL, not an
+error), the migrated database still accepts new writes through the normal
+`create_alert` path, re-opening an already-migrated database doesn't
+raise "duplicate column," and a brand-new database needs no migration at
+all.
+
+Verification: `.venv/bin/python -m pytest -q`: **167 passed** (164
+before, 3 new migration tests). `xcodebuild`: BUILD SUCCEEDED (confirms
+the Swift fix compiles). No Android, `data/raw`, or real-database changes
+-- the real `data/app.sqlite3` was never opened by anything in this
+session; only synthetic/tmp_path databases were used for testing.
+
+Remaining checkpoint resume tasks (#3 incident-dedup persistence, #4
+lifecycle enforcement for confirm/cancel, #5 iOS lifecycle tests, #6
+family monitoring UI/real provider, #7 research consent/export
+verification) are not started.
+
 ## Phases 5-19
 
 Not started.
