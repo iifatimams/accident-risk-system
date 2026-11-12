@@ -2,6 +2,15 @@
 accident_risk/processing/map_context.py
 Autonomous real-time map context and road speed resolver for the UAE.
 Operates using Overpass OSM API with local spatial hashing and Emirate boundary detection.
+
+Phase 10 audit note: get_design_speed()/get_radar_threshold()/get_road_name()
+are NOT currently consumed by anything (confirmed by searching the codebase) --
+only is_in_roundabout() is, from api/main.py, to annotate frame.is_roundabout
+server-side. The on-device risk model's actual live designSpeed feature comes
+from a SEPARATE implementation, ios/RoadSense/Services/ContextManager.swift,
+which queries Overpass directly from the phone. This class is not dead code,
+but most of its public surface currently is -- documented here so a future
+change doesn't assume editing get_design_speed() affects live predictions.
 """
 
 import json

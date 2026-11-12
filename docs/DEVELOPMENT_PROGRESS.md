@@ -799,6 +799,66 @@ Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **73
 passed** (13 new). `pytest`: **174 passed** (1 new). No Android,
 `data/raw`, or real-database changes.
 
-## Phases 10-19
+## Phase 10 -- Map, GPS and weather correctness: AUDITED, two real bugs fixed
+
+Audited both map-context implementations end to end (there are two: the
+Python `MapContextResolver` and the iOS `ContextManager.swift` -- see
+below) and the OpenWeather integration.
+
+**Found and fixed a real, training-parity bug**: `ContextManager.swift`
+defaulted/fell back `designSpeed` to **80.0 km/h** whenever no OSM
+`maxspeed` tag was found nearby -- but `scripts/train_polidriving.py`'s
+own missing-value imputation for `design_speed` is **70.0**, confirmed by
+reading that script directly. `RoadSenseOnDeviceRiskEngine.swift`'s own
+existing comment on its OTHER missing-feature defaults already warns
+about exactly this ("any mismatch here biases every live prediction away
+from what the model was actually trained to expect for 'unknown'") --
+this was that exact mismatch, just undiscovered until this audit. Fixed
+to 70.0, matching training.
+
+**Found and fixed the directive's own named complaint**: "do not
+silently label guessed fallback speeds as official legal speed limits...
+document source and confidence" -- there was no way to tell a real
+OSM-sourced limit from a guessed/fallback one at all, for either design
+speed or weather. Added `isDesignSpeedFromMapData`/`isWeatherLiveData`
+flags (true only on an actual successful fetch with real data), WITHOUT
+changing the numeric value fed to the model (changing the number itself
+risks moving it further from training expectations; only its labeled
+confidence changes).
+
+Extracted the previously-inline, untested parsing/classification logic
+into `ios/RoadSense/Services/RoadContext.swift` (pure, no network/UIKit
+dependency): `parseRoadSpeedFromOverpassTags` and
+`classifyWeatherCondition`, each returning a result struct with the new
+confidence flag. 12 new Swift tests, including the exact regression case
+for the bug found (`testNoElementsFallsBackToTrainingDefaultNotEighty`)
+and confirmation that the weather condition-code mapping matches
+`train_polidriving.py`'s `WEATHER_MAP` taxonomy.
+
+**Documented, not silently left ambiguous**: Phase 10's "make clear which
+component supplies the authoritative live road context" -- there are
+genuinely two independent map-context implementations (Python
+`MapContextResolver`, iOS `ContextManager.swift`). Confirmed by searching
+the whole codebase that the Python resolver's
+`get_design_speed()`/`get_radar_threshold()`/`get_road_name()` are NOT
+consumed by anything; only `is_in_roundabout()` is (server-side, to
+annotate `frame.is_roundabout`). The iOS `ContextManager` is what
+actually feeds the live on-device model's `designSpeed` feature. Both
+files now say this explicitly in their own doc comments, so a future
+change doesn't assume editing the Python resolver's speed logic affects
+live predictions.
+
+What's NOT done: GPS/OBD speed-source priority, offline map-cache
+behavior, and a deeper "nearest/most-relevant way" selection for
+ambiguous nearby roads (the current code takes whichever matching way's
+tag appears LAST in an unordered Overpass response, not necessarily the
+closest) were not audited/fixed this session.
+
+Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **85
+passed** (12 new). `pytest`: **177 passed** (unaffected -- this work
+didn't touch any tested Python behavior, only documentation). No
+Android, `data/raw`, or real-database changes.
+
+## Phases 11-19
 
 Not started.
