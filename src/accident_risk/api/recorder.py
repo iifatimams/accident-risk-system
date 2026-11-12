@@ -54,14 +54,26 @@ class SessionRecorder:
         with self._lock:
             return self._sessions.get(stream_id)
 
-    def observe(self, frame: SensorFrame, prediction: PredictionResult | None) -> None:
-        """Record a frame against its session. Never raises into ingestion."""
+    def observe(
+        self,
+        frame: SensorFrame,
+        prediction: PredictionResult | None,
+        camera: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a frame against its session. Never raises into ingestion.
+
+        camera carries front/rear-camera-derived fields (eyes_on_road, traffic
+        level, pedestrian detections, ...) when the caller has them -- these live
+        in the ingestion layer's per-stream UI state, not on SensorFrame itself.
+        """
         try:
-            self._observe(frame, prediction)
+            self._observe(frame, prediction, camera or {})
         except Exception:  # noqa: BLE001 - storage must never break acquisition
             LOGGER.exception("recorder_failed", extra={"context": {"stream": frame.stream_id}})
 
-    def _observe(self, frame: SensorFrame, prediction: PredictionResult | None) -> None:
+    def _observe(
+        self, frame: SensorFrame, prediction: PredictionResult | None, camera: dict[str, Any]
+    ) -> None:
         """Append a throttled track point and raise alerts when thresholds are crossed."""
         with self._lock:
             session_id = self._sessions.get(frame.stream_id)
@@ -75,16 +87,15 @@ class SessionRecorder:
             alert_due = now - self._last_alert.get(frame.stream_id, 0.0) >= ALERT_COOLDOWN_SECONDS
 
         if due:
+            # SensorFrame carries m/s; the interface and research export show km/h.
+            speed_kmh = frame.vehicle_speed * 3.6 if frame.vehicle_speed is not None else None
             self.db.add_point(
                 session_id,
                 {
                     "ts": now,
                     "risk_index": prediction.overall_risk_index if prediction else None,
                     "risk_level": prediction.risk_level if prediction else None,
-                    # SensorFrame carries m/s; the interface shows km/h.
-                    "speed_kmh": frame.vehicle_speed * 3.6
-                    if frame.vehicle_speed is not None
-                    else None,
+                    "speed_kmh": speed_kmh,
                     "rpm": frame.rpm,
                     "engine_load": frame.engine_load,
                     "throttle": frame.throttle_position,
@@ -93,6 +104,7 @@ class SessionRecorder:
                     "longitude": frame.gps_longitude,
                 },
             )
+            self._add_research_sample(session_id, frame, prediction, camera, speed_kmh)
 
         if prediction is None or prediction.overall_risk_index is None or not alert_due:
             return
@@ -112,6 +124,104 @@ class SessionRecorder:
             latitude=frame.gps_latitude,
             longitude=frame.gps_longitude,
         )
+
+    # Sources that plausibly originate from an assigned external device, by
+    # devices.kind. The wire protocol carries no explicit device id field, so
+    # this is the best available attribution at observation time -- not a
+    # reconstruction from a later snapshot, but still best-effort, and marked
+    # explicitly unresolved rather than silently guessed when ambiguous.
+    _DEVICE_KIND_BY_SOURCE = {
+        "obd": "adapter",
+        "whoop_ble": "wearable",
+        "wearable": "wearable",
+    }
+
+    def _resolve_device_id(self, user_id: int, source: str) -> str:
+        """Device attribution at the moment this sample is recorded. Never
+        reconstructed later from whatever happens to be assigned at export
+        time -- this is evaluated synchronously as each frame arrives."""
+        kind = self._DEVICE_KIND_BY_SOURCE.get(source)
+        if kind is None:
+            return "not_applicable:source_has_no_external_device"
+        candidates = [d for d in self.db.kit_for_user(user_id) if d["kind"] == kind]
+        if len(candidates) == 1:
+            return candidates[0]["identifier"]
+        if not candidates:
+            return "unresolved:none_assigned"
+        return "unresolved:ambiguous(" + ",".join(sorted(d["identifier"] for d in candidates)) + ")"
+
+    def _add_research_sample(
+        self,
+        session_id: int,
+        frame: SensorFrame,
+        prediction: PredictionResult | None,
+        camera: dict[str, Any],
+        speed_kmh: float | None,
+    ) -> None:
+        """Append the research-grade record (recording/export milestone) alongside
+        the throttled track point. Missing readings stay None/absent -- never
+        coerced to zero -- and sensor_timestamps preserves each sensor's original
+        observation time, independent of when this frame itself arrived.
+
+        Gated on this participant's OWN research consent -- separate from, and
+        never implied by, any family-monitoring consent (not yet built). A
+        revocation stops future samples starting here; it does not delete
+        rows already written while consent was active. session_points (the
+        core dashboard/live-map feature) is written regardless -- consent
+        gates the extra research-grade record, not core safety recording."""
+        session = self.db.get_session(session_id)
+        if session is None or not self.db.get_research_consent(session["user_id"])["granted"]:
+            return
+        device_id = self._resolve_device_id(session["user_id"], frame.source)
+
+        thresholds = self.db.get_settings()
+        risk_index = prediction.overall_risk_index if prediction else None
+        warning_fired = risk_index is not None and risk_index >= thresholds["risk_high_threshold"]
+
+        payload: dict[str, Any] = {
+            "speed_kmh": speed_kmh,
+            "rpm": frame.rpm,
+            "throttle_position": frame.throttle_position,
+            "engine_load": frame.engine_load,
+            "steering_angle": frame.steering_angle,
+            "tire_pressure_fl": frame.tire_pressure_fl,
+            "tire_pressure_fr": frame.tire_pressure_fr,
+            "tire_pressure_rl": frame.tire_pressure_rl,
+            "tire_pressure_rr": frame.tire_pressure_rr,
+            "accel_x": frame.accel_x, "accel_y": frame.accel_y, "accel_z": frame.accel_z,
+            "gyro_x": frame.gyro_x, "gyro_y": frame.gyro_y, "gyro_z": frame.gyro_z,
+            "gps_latitude": frame.gps_latitude,
+            "gps_longitude": frame.gps_longitude,
+            "gps_heading": frame.gps_heading,
+            "is_roundabout": frame.is_roundabout,
+            "heart_rate": frame.heart_rate,
+            "spo2": frame.spo2,
+            "hrv_rmssd": frame.hrv_rmssd,
+            "rr_interval_ms": frame.rr_interval_ms,
+            "physiology_signal_quality": frame.physiology_signal_quality,
+            "sensor_timestamps": frame.sensor_timestamps,
+            "eyes_on_road": camera.get("eyes_on_road"),
+            "eyes_closed_sec": camera.get("eyes_closed_sec"),
+            "traffic_level": camera.get("traffic_level"),
+            "pedestrians_detected": camera.get("pedestrians_detected"),
+            "pedestrian_count": camera.get("pedestrian_count"),
+            "lead_closing_fast": camera.get("lead_closing_fast"),
+            "warning_fired": warning_fired,
+        }
+        if prediction is not None:
+            payload.update({
+                "event_detection_score": prediction.event_detection_score,
+                "vehicle_risk_score": prediction.vehicle_risk_score,
+                "driver_state_risk": prediction.driver_state_risk,
+                "overall_risk_index": prediction.overall_risk_index,
+                "risk_level": prediction.risk_level,
+                "data_quality": prediction.data_quality,
+                "model_version": prediction.model_version,
+                "quality_flags": prediction.quality_flags,
+                "sensor_age_seconds": prediction.sensor_age_seconds,
+                "inference_latency_ms": prediction.inference_latency_ms,
+            })
+        self.db.add_sample(session_id, frame.timestamp, device_id, frame.source, payload)
 
     def report_collision(
         self, stream_id: str, latitude: float | None, longitude: float | None

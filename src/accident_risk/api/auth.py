@@ -72,9 +72,15 @@ class AuthError(Exception):
 
 
 class AuthService:
-    def __init__(self, database: Database, expose_codes: bool = True) -> None:
+    def __init__(self, database: Database, dev_mock_sms_delivery: bool = False) -> None:
+        """dev_mock_sms_delivery must stay False in any deployment with real
+        users: True makes request_code hand a working login code straight
+        back to whoever asks for an already-known phone number, with no
+        proof they own that number. It exists only for a local, offline
+        demonstration with no real Twilio delivery -- opt in explicitly at
+        the call site (see create_app's own parameter), never ambiently."""
         self.db = database
-        self.expose_codes = expose_codes
+        self.dev_mock_sms_delivery = dev_mock_sms_delivery
 
     def request_code(self, raw_phone: str) -> dict[str, Any]:
         """Create a single-use login code.
@@ -82,6 +88,7 @@ class AuthService:
         """
         phone = normalise_phone(raw_phone)
         user = self.db.get_user_by_phone(phone)
+        pre_existing = user is not None
 
         # Auto-create driver account if not existing yet (pilot testing usability)
         if user is None:
@@ -115,10 +122,20 @@ class AuthService:
             "expires_in": int(CODE_TTL_SECONDS),
         }
 
-        # Expose code directly in API response if real SMS is not configured or in dev mode
-        if self.expose_codes or not sms_dispatched:
+        # The code is echoed back in the API response ONLY when
+        # dev_mock_sms_delivery was explicitly turned on AND the identity was
+        # already known. Real SMS merely failing to send is NOT a reason to
+        # leak the code to the caller -- in normal operation (the default),
+        # nothing is ever returned here, for a new number or an existing one;
+        # the legitimate owner's phone either gets the real SMS or, in a dev
+        # deployment, someone with server-log access reads the console print
+        # above. An unauthenticated caller who merely knows a phone number
+        # must never be able to fetch that account's login code this way.
+        if pre_existing and self.dev_mock_sms_delivery:
             result["code"] = code
-            result["warning"] = "Development login: code provided directly in response."
+            result["warning"] = (
+                "DEV MOCK SMS DELIVERY IS ON. Never enable this with real users."
+            )
 
         return result
 

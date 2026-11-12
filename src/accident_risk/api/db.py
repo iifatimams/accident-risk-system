@@ -83,6 +83,32 @@ CREATE TABLE IF NOT EXISTS session_gaps (
     ended_at      REAL
 );
 
+-- Research-grade record, alongside (not replacing) the throttled session_points
+-- used by the live map/history UI. Same 1Hz cadence as session_points -- raw
+-- per-frame data still does not belong in SQLite. Everything beyond the few
+-- queryable columns (ts, device, source) lives in payload_json so adding a new
+-- sensor/derived field never requires a migration.
+CREATE TABLE IF NOT EXISTS session_samples (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    ts            REAL    NOT NULL,
+    device_id     TEXT,
+    source        TEXT    NOT NULL,
+    payload_json  TEXT    NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_samples_session ON session_samples(session_id, ts);
+
+-- Explicit, self-granted, revocable consent for research recording/export.
+-- Independent of family-monitoring consent (not yet built) and of any
+-- role/ownership check on export -- consent gates whether research-grade
+-- data exists/ships for THIS participant at all, regardless of who is asking.
+CREATE TABLE IF NOT EXISTS research_consent (
+    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    granted       INTEGER NOT NULL DEFAULT 0,
+    granted_at    REAL,
+    revoked_at    REAL
+);
+
 CREATE TABLE IF NOT EXISTS alerts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id    INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
@@ -294,6 +320,36 @@ class Database:
             )
             return [dict(r) for r in rows]
 
+    # ------------------------------------------------------- research consent
+
+    def get_research_consent(self, user_id: int) -> dict[str, Any]:
+        """Current consent state; a user who has never decided reads as not granted."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM research_consent WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        if row is None:
+            return {"user_id": user_id, "granted": False, "granted_at": None, "revoked_at": None}
+        return {**dict(row), "granted": bool(row["granted"])}
+
+    def set_research_consent(self, user_id: int, granted: bool) -> dict[str, Any]:
+        """Grant or revoke research consent. Revocation stops future research
+        recording; it does not retroactively delete samples already written
+        while consent was active."""
+        now = time.time()
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO research_consent(user_id, granted, granted_at, revoked_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                "granted = excluded.granted, "
+                "granted_at = CASE WHEN excluded.granted = 1 THEN excluded.granted_at "
+                "ELSE research_consent.granted_at END, "
+                "revoked_at = CASE WHEN excluded.granted = 0 THEN excluded.revoked_at "
+                "ELSE research_consent.revoked_at END",
+                (user_id, int(granted), now if granted else None, None if granted else now),
+            )
+        return self.get_research_consent(user_id)
+
     # ------------------------------------------------------------- sessions
 
     def start_session(self, user_id: int, stream_id: str, started_at: float | None = None) -> dict:
@@ -355,6 +411,36 @@ class Database:
                 (session_id, limit),
             )
             return [dict(r) for r in rows]
+
+    def add_sample(
+        self, session_id: int, ts: float, device_id: str | None, source: str, payload: dict[str, Any]
+    ) -> None:
+        """Append one research-grade sample (NFR: recording/export milestone).
+
+        payload holds every field beyond (session_id, ts, device_id, source) as
+        JSON, so new sensor/derived fields never require a schema migration.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO session_samples(session_id, ts, device_id, source, payload_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, ts, device_id, source, json.dumps(payload, separators=(",", ":"))),
+            )
+
+    def session_samples(self, session_id: int, limit: int = 20000) -> list[dict[str, Any]]:
+        """Return a session's research-grade samples in time order, payload inlined."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT ts, device_id, source, payload_json FROM session_samples "
+                "WHERE session_id = ? ORDER BY ts LIMIT ?",
+                (session_id, limit),
+            )
+            out = []
+            for row in rows:
+                record = {"ts": row["ts"], "device_id": row["device_id"], "source": row["source"]}
+                record.update(json.loads(row["payload_json"]))
+                out.append(record)
+            return out
 
     def record_gap(self, session_id: int, source: str, started_at: float) -> int:
         """Open a gap record for a dropped sensor link (FR13.5)."""
