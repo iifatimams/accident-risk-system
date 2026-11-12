@@ -143,13 +143,21 @@ EXPORT_COLUMNS = (
     "accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z",
     "gps_latitude", "gps_longitude", "gps_heading", "is_roundabout",
     "heart_rate", "spo2", "hrv_rmssd", "rr_interval_ms", "physiology_signal_quality",
-    "eyes_on_road", "eyes_closed_sec", "traffic_level", "pedestrians_detected",
-    "pedestrian_count", "lead_closing_fast",
+    "eyes_on_road", "attention_state", "eyes_closed_sec", "traffic_level",
+    "pedestrians_detected", "pedestrian_count", "pedestrian_hazard_state",
+    "lead_closing_fast", "forward_hazard_state",
     "event_detection_score", "vehicle_risk_score", "driver_state_risk",
     "overall_risk_index", "risk_level", "data_quality", "model_version",
     "quality_flags", "sensor_age_seconds", "inference_latency_ms", "warning_fired",
     "sensor_timestamps",
 )
+# Bumped whenever EXPORT_COLUMNS changes shape (a column added/removed/
+# renamed) -- Phase 17's "dataset versioning. reproducible experiment
+# manifests": a researcher comparing two exports needs to know whether a
+# missing column means "not recorded for this session" or "this export
+# format predates that column." Embedded in every export (see
+# _prepare_export/export_session_json/export_session_csv below).
+EXPORT_SCHEMA_VERSION = "2"
 
 
 def pseudonymize_participant(user_id: int) -> str:
@@ -614,6 +622,12 @@ def create_router(
             "pseudonymous_participant_id": pseudonymize_participant(session["user_id"]),
             "session_id": session_id,
             "includes_precise_location": include_location,
+            "manifest": {
+                "export_schema_version": EXPORT_SCHEMA_VERSION,
+                "columns": list(EXPORT_COLUMNS),
+                "row_count": len(rows),
+                "generated_at": time.time(),
+            },
             "rows": rows,
         }
 
@@ -636,7 +650,13 @@ def create_router(
         return Response(
             content=buffer.getvalue(),
             media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="session_{session_id}_research_export.csv"'},
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="session_{session_id}_research_export'
+                    f'_schema_v{EXPORT_SCHEMA_VERSION}.csv"'
+                ),
+                "X-Export-Schema-Version": EXPORT_SCHEMA_VERSION,
+            },
         )
 
     @router.get("/live")
