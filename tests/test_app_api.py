@@ -481,6 +481,153 @@ def test_client_incident_id_survives_offline_retry_after_the_cooldown_window(
     assert alerts[0]["status"] == "confirmed"  # the retry did not reset it to awaiting_confirmation
 
 
+def test_client_incident_id_retry_after_session_ended_still_resolves_to_existing_alert(
+    client, people
+):
+    """Checkpoint resume task #3: a retry can arrive after the stream was
+    released (session stopped), e.g. the app relaunched and re-registered
+    the same still-pending client_incident_id, or an offline-queued upload
+    simply lands late. SessionRecorder._sessions no longer has this
+    stream_id at all once the session ends -- this must still resolve to
+    the SAME alert via the database, not silently return null or create a
+    user_id=None row."""
+    headers = sign_in(client, "+971501110001")
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    stream_id = started["stream_id"]
+
+    first = client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": stream_id,
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+        "client_incident_id": "test-incident-after-session-end",
+    })
+    assert first.status_code == 200
+    original_alert_id = first.json()["collision_alert_id"]
+    assert original_alert_id is not None
+
+    client.post("/app/api/driver/session/stop", headers=headers, json={})
+
+    retry = client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": stream_id,
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+        "client_incident_id": "test-incident-after-session-end",
+    })
+    assert retry.status_code == 200
+    assert retry.json()["collision_alert_id"] == original_alert_id
+
+    alerts = client.get("/app/api/alerts", headers=headers).json()
+    assert len(alerts) == 1
+
+
+def test_client_incident_id_dedup_survives_server_restart(tmp_path, models):
+    """Checkpoint resume task #3: the previous dedup cache
+    (SessionRecorder._incident_ids_seen) was an in-process dict, lost on
+    every server restart -- a retry arriving after a restart would create a
+    SECOND alert for the same real event. Simulates a restart by creating
+    a brand-new app/InferenceEngine/SessionRecorder against the SAME sqlite
+    file, with no in-memory state carried over at all."""
+    db_path = tmp_path / "restart_test.sqlite3"
+
+    app1 = create_app(InferenceEngine(*models), database_path=db_path)
+    with TestClient(app1) as client1:
+        app1.state.db.create_user("+971501110001", "Driver One", "driver")
+        headers = sign_in(client1, "+971501110001")
+        started = client1.post(
+            "/app/api/driver/session/start", headers=headers, json={}
+        ).json()
+        first = client1.post("/ingest", json={
+            "timestamp": time.time(), "source": "ios", "stream_id": started["stream_id"],
+            "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+            "client_incident_id": "test-incident-survives-restart",
+        })
+        assert first.status_code == 200
+        original_alert_id = first.json()["collision_alert_id"]
+        assert original_alert_id is not None
+
+    # A fresh app -- fresh InferenceEngine, fresh SessionRecorder, nothing
+    # registered, nothing cached -- opened against the SAME database file.
+    app2 = create_app(InferenceEngine(*models), database_path=db_path)
+    with TestClient(app2) as client2:
+        retry = client2.post("/ingest", json={
+            "timestamp": time.time(), "source": "ios", "stream_id": "a-different-stream-id",
+            "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+            "client_incident_id": "test-incident-survives-restart",
+        })
+        assert retry.status_code == 200
+        assert retry.json()["collision_alert_id"] == original_alert_id
+
+        headers2 = sign_in(client2, "+971501110001")
+        alerts = client2.get("/app/api/alerts", headers=headers2).json()
+        assert len(alerts) == 1
+
+
+def test_concurrent_get_or_create_collision_alert_creates_only_one_row(people):
+    """Checkpoint resume task #3: the old check-then-create was not atomic
+    -- two concurrent callers for the SAME client_incident_id (the
+    immediate on-device report and a retry-timer upload landing before
+    either response returns) could both pass a "not seen yet" check before
+    either recorded it. Hits Database.get_or_create_collision_alert
+    directly from real concurrent threads (not through the HTTP/pipeline
+    layer, which has its own unrelated frame-ordering constraints) and
+    asserts exactly one row is ever created, with every caller agreeing on
+    its id."""
+    import concurrent.futures
+
+    user_id = people.get_user_by_phone("+971501110001")["id"]
+
+    def attempt(_):
+        incident, created = people.get_or_create_collision_alert(
+            "test-incident-concurrent-retry", user_id, None,
+            status="suspected", detail={"source": "automatic_detector"},
+        )
+        return incident["id"], created
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(attempt, range(16)))
+
+    ids = {r[0] for r in results}
+    assert len(ids) == 1, f"expected every caller to agree on one alert id, got {ids}"
+    created_flags = [r[1] for r in results]
+    assert created_flags.count(True) == 1, "exactly one caller must have actually created the row"
+
+    with people.connect() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) AS n FROM alerts WHERE client_incident_id = ?",
+            ("test-incident-concurrent-retry",),
+        ).fetchone()["n"]
+    assert count == 1
+
+
+def test_different_drivers_with_distinct_client_incident_ids_each_get_their_own_alert(
+    client, people
+):
+    """Sanity check in the other direction: dedup must be keyed on the
+    actual client_incident_id, not accidentally merge unrelated incidents
+    from different drivers/streams."""
+    headers1 = sign_in(client, "+971501110001")
+    client.app.state.db.create_user("+971501110004", "Driver Two", "driver")
+    headers2 = sign_in(client, "+971501110004")
+    started1 = client.post("/app/api/driver/session/start", headers=headers1, json={}).json()
+    started2 = client.post("/app/api/driver/session/start", headers=headers2, json={}).json()
+
+    r1 = client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": started1["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+        "client_incident_id": "driver-one-incident",
+    })
+    r2 = client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": started2["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+        "client_incident_id": "driver-two-incident",
+    })
+    assert r1.status_code == 200 and r2.status_code == 200
+    id1, id2 = r1.json()["collision_alert_id"], r2.json()["collision_alert_id"]
+    assert id1 is not None and id2 is not None and id1 != id2
+
+    alerts1 = client.get("/app/api/alerts", headers=headers1).json()
+    alerts2 = client.get("/app/api/alerts", headers=headers2).json()
+    assert len(alerts1) == 1 and len(alerts2) == 1
+
+
 def test_collision_incident_lifecycle_dismiss_resolve_and_invalid_transitions(
     client, people
 ):
