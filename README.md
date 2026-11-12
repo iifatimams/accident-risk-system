@@ -45,11 +45,9 @@ accident-risk-system/
 │   ├── recordings/
 │   └── app.sqlite3
 ├── docs/
-│   ├── ANDROID.md
 │   ├── ARCHITECTURE.md
 │   ├── DATASETS.md
 │   ├── INTERFACE.md
-│   ├── LIVE_HARDWARE.md
 │   ├── LIVE_SETUP.md
 │   ├── MODEL_LIMITATIONS.md
 │   ├── REPOSITORY_TREE.md

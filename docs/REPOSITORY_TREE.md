@@ -92,11 +92,9 @@ accident-risk-system/
 │       ├── realtime_telemetry_20261027_160940.csv
 │       └── realtime_telemetry_20261027_161806.csv
 ├── docs/
-│   ├── ANDROID.md
 │   ├── ARCHITECTURE.md
 │   ├── DATASETS.md
 │   ├── INTERFACE.md
-│   ├── LIVE_HARDWARE.md
 │   ├── LIVE_SETUP.md
 │   ├── MODEL_LIMITATIONS.md
 │   ├── REPOSITORY_TREE.md
@@ -109,7 +107,6 @@ accident-risk-system/
 │   ├── prepare_polidriving.py
 │   ├── prepare_vzcrash.py
 │   ├── replay.py
-│   ├── run_advanced_terminal.py
 │   ├── run_live_terminal.py
 │   ├── serve.py
 │   ├── stream_whoop_ble_csv.py
