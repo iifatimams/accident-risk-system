@@ -255,19 +255,62 @@ evaluate.
 Verification: `.venv/bin/python -m pytest -q`: **164 passed** (129 before
 this work, 35 new). No Android, `data/raw`, or real-dataset changes.
 
-## Phases 3-19
+## Phase 4 -- Rear-camera object detection: audit + first real benchmark run
 
-Not started, except the synthetic-fixture work above (user-requested,
-done ahead of Phase 3). Explicitly deferred this session, per the user's
-own request to extend toward them next:
+### 4.1 Audit of existing BDD100K work
 
-- **SUMO/CARLA UAE OpenStreetMap simulation (Phase 8.1-8.3)**: substantial
-  new infrastructure (simulator install, OSM road-network import, scenario
-  authoring) -- not attempted. Needs a scoping decision (SUMO vs CARLA,
-  hardware requirements) before implementation, per the directive's own
-  instruction not to install a heavy simulator without first documenting
-  requirements.
-- **Real labeled BDD100K/DMD image evaluation (Phase 3/4)**: requires
-  auditing what's actually downloaded/available locally first (the
-  directive is explicit: do not assume a benchmark script means a dataset
-  is present) -- not attempted this session.
+Read-only audit, no files modified: `data/raw/bdd100k/` contains the full
+100k-images zip (5.3GB) and two label zips, but `data/interim/bdd100k_frames/`
+was empty and no benchmark output existed anywhere in the repo (checked
+`artifacts/`, `models/`) before this session. `scripts/benchmark_detector_bdd100k.py`
+existed but had evidently never actually been run here -- confirms the
+directive's own caution not to assume a script means a result exists.
+
+`data/raw/dmd/` similarly contains 108GB of compressed drowsiness/gaze/
+distraction archives, fully unextracted, with no prior training output.
+DMD audit stops here this session (Phase 3) -- 108GB is a much larger
+extraction than BDD100K's sample, and the user chose to prioritize BDD100K
+first. SUMO/CARLA (Phase 8.1) were also checked and are not installed.
+
+### 4.2/4.3 First real benchmark run
+
+Extracted a deterministic 40-image sample of the real BDD100K val set
+(every 250th of 10,000 val filenames, sorted) plus matching real
+ground-truth label JSONs into `data/interim/bdd100k_frames/` (gitignored,
+not committed, fully reproducible from `data/raw/bdd100k/*.zip` -- exact
+commands in the results doc below). Fixed the script's hardcoded `/tmp/...`
+paths to the repo's own `data/interim/` so this is reproducible by anyone
+who clones the repo and has the raw zips, rather than depending on a path
+that only existed on one machine.
+
+Ran the existing COCO-pretrained `fasterrcnn_mobilenet_v3_large_320_fpn`
+against it. Full results, methodology, and honest caveats:
+[docs/benchmarks/bdd100k_pretrained_coco_v1.md](benchmarks/bdd100k_pretrained_coco_v1.md).
+
+Headline (n=40 images, score>=0.5, IoU>=0.5): car precision 0.736/recall
+0.176, person recall 0.056, traffic light 0/116 recall, traffic sign
+0/150 recall (partially a taxonomy gap, not just a miss -- see doc). This
+is a genuine measured result, not fabricated, and is explicitly flagged as
+a feasibility smoke test on n=40, not a statistically powered benchmark --
+per the directive's own instruction, this is NOT yet enough evidence for a
+fine-tuning decision (Phase 4.3's actual ask).
+
+What's NOT done:
+
+- DMD audit/extraction (Phase 3) -- deferred by the user's explicit choice
+  this session; 108GB raw archives remain unextracted.
+- A larger (ideally full 10,000-image) BDD100K val run, and a day/night
+  breakdown (the script doesn't currently read BDD100K's `timeofday`
+  attribute) -- both explicitly named as follow-ups in the results doc.
+- SUMO/CARLA UAE simulation (Phase 8.1-8.3): neither is installed; not
+  attempted this session.
+- Any Core ML export or on-device benchmark (Phase 4.4/4.5): this ran the
+  full PyTorch model on this Mac, not an exported/quantized mobile model.
+
+Verification: the benchmark script itself ran to completion with real
+data (see results doc); `.venv/bin/python -m pytest -q`: still **164
+passed** (unaffected -- this work didn't touch any tested code path).
+
+## Phases 5-19
+
+Not started.
