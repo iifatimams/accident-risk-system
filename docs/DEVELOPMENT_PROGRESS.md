@@ -517,9 +517,49 @@ drivers' distinct incident ids never get merged.
 Verification: `.venv/bin/python -m pytest -q`: **171 passed** (167
 before, 4 new). No Android, `data/raw`, or real-database changes.
 
-Remaining checkpoint resume tasks (#4 lifecycle enforcement for
-confirm/cancel, #5 iOS lifecycle tests, #6 family monitoring UI/real
-provider, #7 research consent/export verification) are not started.
+### #4: confirm/cancel lifecycle enforcement + manager-vs-driver confirmation wording -- FIXED
+
+Confirmed the bug: `enforce_lifecycle=action in {"dismiss", "resolve"}`
+meant confirm/cancel were NEVER lifecycle-enforced at all, for either
+vocabulary. A stray "confirm" could reopen an already-resolved/
+dismissed/timed-out automatic incident. Fixing this is not as simple as
+checking the alert's current status against `INCIDENT_LIFECYCLE`,
+though: the two status vocabularies (legacy pending/confirmed/cancelled,
+and the richer automatic-detector suspected/awaiting_confirmation/.../
+resolved) share status STRINGS -- a legacy alert also reaches
+"confirmed" -- so status alone can't tell them apart (confirmed this by
+writing a test with that exact naive fix first; it broke a legacy
+alert's later "cancel"). The actual unambiguous signal is
+`detail.source == "automatic_detector"`, set only by
+`recorder._check_collision`, never by a manual report or a plain
+high_risk alert. Fixed `act_on_alert` to enforce lifecycle whenever
+`action in {"dismiss", "resolve"}` (unchanged) OR the alert is an
+automatic incident by that signal -- legacy confirm/cancel stays exactly
+as permissive as before.
+
+Also fixed the checkpoint's other named gap in the same function: family
+notification wording. `build_message` assumed "confirmed" always means
+"the driver themselves confirmed it," but an account manager can confirm
+another user's alert (the same `role_allows(..., "account_manager")`
+check that lets a manager view/act on any driver's alerts). Added a
+`confirmed_by_driver` parameter (derived from
+`alert["acknowledged_by"] == alert["user_id"]`) so a manager-confirmed
+incident's family message says "confirmed by an account manager, not
+the driver" instead of falsely attributing it to the driver.
+
+4 new tests: confirm/cancel now rejected on a dismissed/resolved
+automatic incident (every action, not just repeating the same one),
+confirm/cancel REMAIN unrestricted on a legacy pending alert (the
+regression guard for the naive status-only fix that would have broken
+this), and the manager-confirmation wording distinction actually
+reaching the family notification message.
+
+Verification: `.venv/bin/python -m pytest -q`: **177 passed** (3 new).
+No Android, `data/raw`, or real-database changes.
+
+Remaining checkpoint resume tasks (#5 iOS lifecycle tests, #6 family
+monitoring UI/real provider, #7 research consent/export verification)
+are not started.
 
 ## Phase 5 -- Temporal object tracking: IMPLEMENTED (logic-complete, pending a real detector)
 
