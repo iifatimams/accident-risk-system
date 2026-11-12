@@ -1220,12 +1220,23 @@ public class BackgroundCaptureService:
       request.httpMethod = "POST"
       request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
       URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-        guard let self = self, error == nil,
-          let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode)
-        else {
-          return  // left un-synced; retried next cycle
+        guard let self = self else {
+          return
         }
-        self.incidentStore.markDecisionSynced(id: incidentId)
+        guard error == nil, let http = response as? HTTPURLResponse else {
+          return  // network/transport failure -- transient, retried next cycle
+        }
+        if (200...299).contains(http.statusCode) {
+          self.incidentStore.markDecisionSynced(id: incidentId)
+        } else if http.statusCode == 409 {
+          // Invalid lifecycle transition -- the server has already settled
+          // this incident to some other final state (e.g. dismissed via
+          // the dashboard). Permanent, not transient: retrying this exact
+          // request can never succeed, so stop rather than retry forever.
+          self.incidentStore.markDecisionRejected(id: incidentId)
+        }
+        // Any other status (401/403/5xx): left un-synced, retried next
+        // cycle -- those CAN plausibly resolve (re-auth, server recovers).
       }.resume()
     }
   }

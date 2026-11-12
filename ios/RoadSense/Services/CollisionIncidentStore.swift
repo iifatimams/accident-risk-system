@@ -26,6 +26,17 @@ public struct StoredIncident: Codable, Identifiable, Equatable {
   public var serverAlertId: Int?
   public var uploaded: Bool
   public var syncedDecision: Bool
+  /// True once the server has definitively REJECTED this local decision
+  /// (HTTP 409 -- an invalid lifecycle transition, e.g. someone else
+  /// already dismissed/resolved it) rather than merely failed to respond.
+  /// Without this, `pendingDecisionSync()` retried a permanently-rejected
+  /// sync forever, every 10s, for the rest of the app session -- a real
+  /// consequence of checkpoint resume task #4 making the server correctly
+  /// reject those transitions. Optional (not a plain Bool) so decoding an
+  /// incident saved before this field existed doesn't fail outright and
+  /// silently drop every previously stored incident -- Codable does not
+  /// apply a stored property's default value when a key is simply absent.
+  public var syncRejected: Bool?
 }
 
 /// The phone must never depend on the server to preserve an accident event:
@@ -55,7 +66,7 @@ public final class CollisionIncidentStore {
       onsetEstimate: suspicion.onsetEstimate, modelVersion: suspicion.modelVersion,
       status: .suspected, detectedAt: suspicion.onsetEstimate,
       confirmedAt: nil, dismissedAt: nil, serverAlertId: nil,
-      uploaded: false, syncedDecision: false
+      uploaded: false, syncedDecision: false, syncRejected: false
     )
     queue.sync {
       var all = loadAllLocked()
@@ -110,15 +121,30 @@ public final class CollisionIncidentStore {
     _ = mutate(id: id) { $0.syncedDecision = true }
   }
 
+  /// The server definitively rejected this decision (HTTP 409 -- an
+  /// invalid lifecycle transition). Distinct from "not yet synced":
+  /// retrying this is pointless, since the rejection is about the
+  /// server's CURRENT state (e.g. another party already
+  /// dismissed/resolved it), not a transient failure.
+  public func markDecisionRejected(id: String) {
+    _ = mutate(id: id) { $0.syncRejected = true }
+  }
+
   /// Detections that haven't reached the server yet -- retry these.
   public func pendingUpload() -> [StoredIncident] {
     all().filter { !$0.uploaded }
   }
 
   /// Uploaded incidents whose confirm/dismiss decision (made locally,
-  /// possibly while offline) hasn't been told to the server yet.
+  /// possibly while offline) hasn't been told to the server yet. Excludes
+  /// anything already marked syncRejected -- without that, a permanently
+  /// rejected decision (checkpoint resume task #4's lifecycle enforcement
+  /// correctly saying no) retried forever, every cycle, for the rest of
+  /// the app session.
   public func pendingDecisionSync() -> [StoredIncident] {
-    all().filter { $0.uploaded && $0.status != .suspected && !$0.syncedDecision }
+    all().filter {
+      $0.uploaded && $0.status != .suspected && !$0.syncedDecision && $0.syncRejected != true
+    }
   }
 
   @discardableResult
