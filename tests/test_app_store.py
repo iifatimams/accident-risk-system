@@ -15,11 +15,7 @@ def db(tmp_path):
 
 @pytest.fixture
 def auth(db):
-    return AuthService(
-        db, dev_mock_sms_delivery=True,
-        demo_access_key="synthetic-test-pairing-key-00000000",
-        demo_phone_numbers=["+971501110001"],
-    )
+    return AuthService(db)
 
 
 @pytest.fixture
@@ -65,27 +61,23 @@ def test_duplicate_phone_is_rejected(db, people):
 
 
 def test_login_round_trip(auth, people):
-    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
+    requested = auth.request_code_for_operator("+971501110001")
     result = auth.verify_code("+971501110001", requested["code"])
     assert auth.resolve(result["token"]).role == "driver"
 
 
-def test_unregistered_number_does_not_leak(auth, people):
-    with pytest.raises(AuthError, match="pairing key"):
-        auth.request_code("+971509999999")
-
-
-def test_existing_account_code_is_not_leaked_by_default(db, people, monkeypatch):
-    """The exact unauthorized-login vector: merely knowing a REGISTERED
-    phone number must not be enough to fetch that account's login code,
-    under the default (no explicit dev_mock_sms_delivery) configuration."""
-    monkeypatch.setattr("accident_risk.api.auth._send_real_sms", lambda phone, code: True)
-    default_auth = AuthService(db)
-    assert "code" not in default_auth.request_code("+971501110001")
+def test_public_request_code_never_leaks_for_a_new_or_existing_number(auth, people):
+    """The exact unauthorized-login vector: merely knowing a phone number
+    -- registered or not -- must never be enough to fetch its login code
+    through the public (ngrok-reachable) method. Only
+    request_code_for_operator, used exclusively by the loopback-only
+    console, reveals it."""
+    assert "code" not in auth.request_code("+971509999999")  # new number
+    assert "code" not in auth.request_code("+971501110001")  # existing (people fixture)
 
 
 def test_code_is_single_use(auth, people):
-    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
+    requested = auth.request_code_for_operator("+971501110001")
     auth.verify_code("+971501110001", requested["code"])
     with pytest.raises(AuthError):
         auth.verify_code("+971501110001", requested["code"])
@@ -93,7 +85,7 @@ def test_code_is_single_use(auth, people):
 
 def test_lockout_after_repeated_failures(auth, people):
     """Regression: the attempt counter must survive the raise that follows it."""
-    auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
+    auth.request_code_for_operator("+971501110001")
     for _ in range(5):
         with pytest.raises(AuthError):
             auth.verify_code("+971501110001", "999999")
@@ -103,7 +95,7 @@ def test_lockout_after_repeated_failures(auth, people):
 
 
 def test_expired_code_is_refused(auth, db, people):
-    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
+    requested = auth.request_code_for_operator("+971501110001")
     with db.connect() as connection:
         connection.execute(
             "UPDATE auth_codes SET expires_at = ? WHERE phone = ?",
@@ -114,7 +106,7 @@ def test_expired_code_is_refused(auth, db, people):
 
 
 def test_deactivating_a_user_invalidates_their_token(auth, db, people):
-    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
+    requested = auth.request_code_for_operator("+971501110001")
     token = auth.verify_code("+971501110001", requested["code"])["token"]
     db.update_user(people["driver"]["id"], active=False)
     with pytest.raises(AuthError) as excinfo:
@@ -123,7 +115,7 @@ def test_deactivating_a_user_invalidates_their_token(auth, db, people):
 
 
 def test_secrets_are_not_stored_in_clear_text(auth, db, people):
-    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
+    requested = auth.request_code_for_operator("+971501110001")
     token = auth.verify_code("+971501110001", requested["code"])["token"]
     blob = db.path.read_bytes()
     assert token.encode() not in blob

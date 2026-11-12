@@ -65,7 +65,7 @@ final class AuthTests: XCTestCase {
                                      (502,"application/json","<html>Offline</html>"),
                                      (200,"text/plain","{}"), (200,"application/json","{"),
                                      (200,"application/json","{}"), (200,"application/json","[]"),
-                                     (200,"application/json",#"{"sent":false,"delivery":"sms","expires_in":300}"#),
+                                     (200,"application/json",#"{"sent":false,"delivery":"operator_console","expires_in":0}"#),
                                      (302,"text/html","")] {
             let (auth, _) = makeAuth()
             StubProtocol.handler = { _ in (status, mime, body) }
@@ -82,29 +82,29 @@ final class AuthTests: XCTestCase {
         await auth.testConnection()
         XCTAssertTrue(auth.errorMessage!.contains("Cannot reach"))
         XCTAssertNil(auth.connectionMessage)
-        StubProtocol.handler = { _ in (200, "application/json", #"{"service":"roadsense","api_version":1,"demo_mode":true}"#) }
+        StubProtocol.handler = { _ in (200, "application/json", #"{"service":"roadsense","api_version":1}"#) }
         await auth.testConnection()
         XCTAssertNotNil(auth.connectionMessage)
         XCTAssertNil(auth.errorMessage)
-        StubProtocol.handler = { _ in (200, "application/json", #"{"service":"other","api_version":1,"demo_mode":false}"#) }
+        StubProtocol.handler = { _ in (200, "application/json", #"{"service":"other","api_version":1}"#) }
         await auth.testConnection()
         XCTAssertNil(auth.connectionMessage)
         XCTAssertNotNil(auth.errorMessage)
     }
 
-    func testDemoCodeRequiresOptInAndPairingHeader() async {
+    /// The app never learns the code itself -- only whether the server
+    /// claims to have actually sent it (via real SMS, which is never
+    /// configured for this capstone). The code is read from the Mac-local
+    /// operator console instead; see test_login_delivery.py on the Python
+    /// side for that path.
+    func testRequestCodeNeverExposesACodeToTheApp() async {
         let (auth, _) = makeAuth()
-        auth.demoMode = true
-        await auth.requestCode(phone: phone)
-        XCTAssertFalse(auth.isCodeSent)
-        auth.demoKey = String(repeating: "x", count: 32)
-        StubProtocol.handler = { request in
-            XCTAssertEqual(request.value(forHTTPHeaderField: "X-RoadSense-Demo-Key"), String(repeating: "x", count: 32))
-            return (200, "application/json", #"{"sent":true,"delivery":"demo","expires_in":300,"code":"123456"}"#)
+        StubProtocol.handler = { _ in
+            (200, "application/json", #"{"sent":false,"delivery":"operator_console","expires_in":300}"#)
         }
         await auth.requestCode(phone: phone)
-        XCTAssertEqual(auth.devCodeHint, "DEMO ONLY — Code: 123456")
         XCTAssertTrue(auth.isCodeSent)
+        XCTAssertNil(auth.errorMessage)
     }
 
     func testInvalidTokenClearedButNetworkFailureKeepsRetryableToken() async {
@@ -121,14 +121,12 @@ final class AuthTests: XCTestCase {
         XCTAssertTrue(auth.errorMessage!.contains("expired"))
     }
 
-    func testChangingEndpointClearsTokensAndDemoCredentials() async {
+    func testChangingEndpointClearsTokens() async {
         let (auth, defaults) = makeAuth()
         await signIn(auth)
-        auth.demoKey = "secret"
         XCTAssertTrue(auth.saveEndpoint("https://new.example/"))
         XCTAssertFalse(auth.isAuthenticated)
         XCTAssertNil(defaults.string(forKey: "roadsense_auth_token"))
-        XCTAssertTrue(auth.demoKey.isEmpty)
         XCTAssertEqual(auth.baseUrl, "https://new.example")
     }
 

@@ -50,7 +50,7 @@ public enum APIError: LocalizedError {
     }
 }
 
-/// Refuse redirects so neither bearer tokens nor demo keys follow a stale tunnel elsewhere.
+/// Refuse redirects so a bearer token never follows a stale tunnel elsewhere.
 private final class NoRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
@@ -72,8 +72,7 @@ public final class RoadSenseAPI {
 
     /// Validate transport, status, MIME type, JSON and typed fields before returning success.
     public func request<T: Decodable>(base: String, path: String, method: String = "GET",
-                                      body: [String: String]? = nil, token: String? = nil,
-                                      demoKey: String? = nil) async throws -> T {
+                                      body: [String: String]? = nil, token: String? = nil) async throws -> T {
         let endpoint = try ServerConfig.normalize(base)
         guard let url = URL(string: endpoint + path) else { throw APIError.invalidResponse }
         var request = URLRequest(url: url)
@@ -81,7 +80,6 @@ public final class RoadSenseAPI {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        if let demoKey { request.setValue(demoKey, forHTTPHeaderField: "X-RoadSense-Demo-Key") }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -134,9 +132,9 @@ public struct KitDevice: Codable {
     public let identifier: String
     public let status: String
 }
-struct CodeResponse: Decodable { let sent: Bool; let delivery: String; let expires_in: Int; let code: String? }
+struct CodeResponse: Decodable { let sent: Bool; let delivery: String; let expires_in: Int }
 struct VerifyResponse: Decodable { let token: String; let expires_in: Int }
-struct ConnectionResponse: Decodable { let service: String; let api_version: Int; let demo_mode: Bool }
+struct ConnectionResponse: Decodable { let service: String; let api_version: Int }
 struct DriveResponse: Decodable { let id: Int; let stream_id: String; let user_id: Int }
 struct StopResponse: Decodable {
     let status: String?

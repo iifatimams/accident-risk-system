@@ -1,6 +1,11 @@
 """Phone-number authentication with single-use codes and bearer tokens.
-Normal operation requires SMS delivery. Demo codes require a private pairing key
-and an explicit test-account allowlist; delivery failure never enables demo mode.
+
+No real SMS provider is configured for this capstone. A verification code is
+never returned by request_code (the public method, reachable via ngrok) --
+only request_code_for_operator, called exclusively by the loopback-only
+operator console (api/operator.py), reveals it. See that module for how
+network-level isolation (a separate port, never tunneled) enforces this,
+not a header, IP check, or client-side gate.
 """
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ import secrets
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -73,49 +79,78 @@ class AuthError(Exception):
 
 
 class AuthService:
-    def __init__(
-        self, database: Database, dev_mock_sms_delivery: bool = False,
-        demo_access_key: str | None = None, demo_phone_numbers: list[str] | None = None,
-    ) -> None:
-        """Demo mode requires both a strong pairing key and explicit test identities.
-
-        Use a separate synthetic database. The key authenticates the test device;
-        a phone number or a forwarded/private IP address is never authorization.
-        """
+    def __init__(self, database: Database) -> None:
         self.db = database
-        self.dev_mock_sms_delivery = dev_mock_sms_delivery
-        self._demo_key = demo_access_key or ""
-        self._demo_phones = {normalise_phone(p) for p in (demo_phone_numbers or [])}
-        if dev_mock_sms_delivery and (len(self._demo_key) < 32 or not self._demo_phones):
-            raise ValueError("Demo mode requires a pairing key of at least 32 characters and test phone numbers")
+        # phone -> last request_code() timestamp, for the minimal per-phone
+        # request throttle below. In-memory is sufficient: this is abuse
+        # protection on one process, not a durable audit trail.
+        self._last_code_request: dict[str, float] = {}
 
-    def request_code(self, raw_phone: str, *, demo_key: str | None = None) -> dict[str, Any]:
-        """Issue a code only after authorized demo access or successful SMS delivery."""
+    def _check_request_throttle(self, phone: str, min_interval_seconds: float) -> None:
+        now = time.time()
+        last = self._last_code_request.get(phone)
+        if last is not None and now - last < min_interval_seconds:
+            raise AuthError("Please wait a few seconds before requesting another code", 429)
+        self._last_code_request[phone] = now
+
+    def request_code(self, raw_phone: str, *, min_interval_seconds: float = 5.0) -> dict[str, Any]:
+        """Public path (reachable via ngrok). NEVER returns the code --
+        only whether it was actually sent by real SMS. The driver learns
+        the code from the Mac-local operator console instead."""
         phone = normalise_phone(raw_phone)
-        if self.dev_mock_sms_delivery:
-            if not demo_key or not hmac.compare_digest(demo_key.encode(), self._demo_key.encode()):
-                raise AuthError("Demo access requires the private pairing key from the backend operator", 403)
-            if phone not in self._demo_phones:
-                raise AuthError("This number is not an allowed demo account", 403)
-        elif demo_key:
-            raise AuthError("This server is not in demo mode. Turn off demo mode in Settings", 400)
+        self._check_request_throttle(phone, min_interval_seconds)
+        delivered = {"ok": False}
 
+        def sms(p: str, c: str) -> None:
+            # Best-effort real SMS if Twilio env vars happen to be
+            # configured; never required to succeed -- there is no real
+            # SMS provider for this capstone, and the operator console is
+            # how a code is actually read during testing/demonstration.
+            delivered["ok"] = _send_real_sms(p, c)
+
+        self._issue_code_with_sms(phone, sms)
+        return {
+            "sent": delivered["ok"],
+            "delivery": "sms" if delivered["ok"] else "operator_console",
+            "expires_in": int(CODE_TTL_SECONDS),
+        }
+
+    def request_code_for_operator(self, raw_phone: str) -> dict[str, Any]:
+        """Loopback-only path. Reveals the code. Callable only from
+        api/operator.py, which network-isolation (a separate port never
+        tunneled by ngrok) keeps unreachable from the public internet --
+        this method itself has no header/flag gate, by design, since that
+        would be a client-side-style check on the wrong side of the real
+        boundary (which port you can reach)."""
+        phone = normalise_phone(raw_phone)
+        # No SMS attempt at all from this path: the operator console is
+        # the intended, deliberate way to read the code, not a fallback.
+        code, _ = self._issue_code_with_sms(phone, lambda p, c: None)
+        return {"phone": phone, "code": code, "expires_in": int(CODE_TTL_SECONDS)}
+
+    def _issue_code_with_sms(
+        self, phone: str, sms_fn: Callable[[str, str], None]
+    ) -> tuple[str, bool]:
+        """Shared core used by both request_code and
+        request_code_for_operator: create/replace the pending code for this
+        phone (auto-enrolling a new number), then let the caller decide
+        whether/how to attempt real delivery via sms_fn. Returns (code,
+        user_already_existed) -- callers decide what, if anything, to
+        expose to their own caller."""
         user = self.db.get_user_by_phone(phone)
         if user is not None and not user["active"]:
             raise AuthError("This account has been deactivated. Please contact an admin", 403)
 
         code = f"{secrets.randbelow(1_000_000):06d}"
-        if not self.dev_mock_sms_delivery and not _send_real_sms(phone, code):
-            raise AuthError("Verification SMS could not be delivered. Ask the operator to configure SMS or use the restricted demo server", 503)
+        sms_fn(phone, code)
 
-        # New accounts follow the same delivery policy as existing accounts.
-        # Do not create accounts or invalidate codes for rejected demo requests.
         if user is None:
             try:
                 self.db.create_user(phone=phone, name=f"Driver {phone[-4:]}", role="driver")
             except ValueError:
                 if self.db.get_user_by_phone(phone) is None:
                     raise
+
         with self.db.connect() as connection:
             connection.execute(
                 "INSERT INTO auth_codes(phone, code_hash, expires_at, attempts) "
@@ -123,14 +158,7 @@ class AuthService:
                 "code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0",
                 (phone, _digest(code), time.time() + CODE_TTL_SECONDS),
             )
-        result: dict[str, Any] = {
-            "sent": True,
-            "delivery": "demo" if self.dev_mock_sms_delivery else "sms",
-            "expires_in": int(CODE_TTL_SECONDS),
-        }
-        if self.dev_mock_sms_delivery:
-            result["code"] = code
-        return result
+        return code, user is not None
 
     def verify_code(self, raw_phone: str, code: str) -> dict[str, Any]:
         phone = normalise_phone(raw_phone)

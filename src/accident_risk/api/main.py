@@ -82,15 +82,11 @@ def bootstrap_administrator(database: Database, env: EnvironmentSettings) -> Non
 def create_app(
     engine: InferenceEngine | None = None,
     database_path: Path | str | None = None,
-    dev_mock_sms_delivery: bool | None = None,
-    demo_access_key: str | None = None,
-    demo_phone_numbers: list[str] | None = None,
 ) -> FastAPI:
-    """Build the API; optional demo delivery requires a pairing key and allowlist."""
+    """Build the API. No real SMS provider or demo-mode pairing-key system
+    is wired up -- see api/auth.py and api/operator.py for how verification
+    codes are actually revealed to a Mac-local operator instead."""
     env = EnvironmentSettings()
-    demo_enabled = env.dev_mock_sms_delivery if dev_mock_sms_delivery is None else dev_mock_sms_delivery
-    if demo_enabled and database_path is None:
-        raise ValueError("Demo mode requires an explicit isolated database; use scripts/serve_demo.py")
     if engine is None:
         config = load_config(env.config) if env.config.exists() else {}
         configure_logging(config.get("logging", {}).get("level", "INFO"))
@@ -120,19 +116,9 @@ def create_app(
     application.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     database = Database(database_path if database_path is not None else env.database)
-    auth = AuthService(
-        database,
-        dev_mock_sms_delivery=(
-            env.dev_mock_sms_delivery if dev_mock_sms_delivery is None else dev_mock_sms_delivery
-        ),
-        demo_access_key=demo_access_key if demo_access_key is not None else (
-            env.demo_access_key.get_secret_value() if env.demo_access_key else None
-        ),
-        demo_phone_numbers=demo_phone_numbers if demo_phone_numbers is not None else env.demo_phone_numbers,
-    )
+    auth = AuthService(database)
     recorder = SessionRecorder(database)
-    if not demo_enabled:
-        bootstrap_administrator(database, env)
+    bootstrap_administrator(database, env)
     notification_sender = MockNotificationSender()
 
     application.state.db = database

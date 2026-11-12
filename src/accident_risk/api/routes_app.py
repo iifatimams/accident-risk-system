@@ -277,16 +277,15 @@ def create_router(
     @router.get("/connection")
     def connection() -> dict[str, Any]:
         """Non-sensitive identity probe used by the physical phone's Settings screen."""
-        return {"service": "roadsense", "api_version": 1, "demo_mode": auth.dev_mock_sms_delivery}
+        return {"service": "roadsense", "api_version": 1}
 
     @router.post("/auth/request-code")
-    def request_code(
-        payload: CodeRequest, response: Response,
-        x_roadsense_demo_key: Annotated[str | None, Header()] = None,
-    ) -> dict[str, Any]:
+    def request_code(payload: CodeRequest, response: Response) -> dict[str, Any]:
+        """Public, ngrok-reachable. Never returns a verification code --
+        see api/operator.py for the Mac-local console that does."""
         response.headers["Cache-Control"] = "no-store"
         try:
-            return auth.request_code(payload.phone, demo_key=x_roadsense_demo_key)
+            return auth.request_code(payload.phone)
         except AuthError as exc:
             raise HTTPException(exc.status, exc.message) from exc
         except ValueError as exc:

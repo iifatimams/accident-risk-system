@@ -11,26 +11,24 @@ from accident_risk.inference.engine import InferenceEngine
 
 @pytest.fixture
 def app(tmp_path, models):
-    # Explicit test-only opt-in: sign_in() below needs the code back in the
-    # HTTP response. This must never be ambient/default -- see auth.py.
-    return create_app(
-        InferenceEngine(*models),
-        database_path=tmp_path / "app.sqlite3",
-        dev_mock_sms_delivery=True,
-        demo_access_key="synthetic-test-pairing-key-00000000",
-        demo_phone_numbers=[f"+971501110{i:03}" for i in (1, 2, 3, 20, 30, 31, 99)],
-    )
+    return create_app(InferenceEngine(*models), database_path=tmp_path / "app.sqlite3")
 
 
 @pytest.fixture
 def client(app):
-    with TestClient(app, headers={"X-RoadSense-Demo-Key": "synthetic-test-pairing-key-00000000"}) as test_client:
+    with TestClient(app) as test_client:
         yield test_client
 
 
 def sign_in(client, phone):
-    """Complete the two-step phone login and return an auth header."""
-    requested = client.post("/app/api/auth/request-code", json={"phone": phone}).json()
+    """Complete the two-step phone login and return an auth header.
+
+    The code is read via request_code_for_operator directly -- the SAME
+    trusted path the loopback-only operator console (api/operator.py) uses
+    -- not via the public HTTP request-code response, which never
+    contains it (see test_login_delivery.py)."""
+    app_state = client.app.state
+    requested = app_state.auth.request_code_for_operator(phone)
     verified = client.post(
         "/app/api/auth/verify", json={"phone": phone, "code": requested["code"]}
     )
