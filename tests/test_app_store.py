@@ -15,11 +15,11 @@ def db(tmp_path):
 
 @pytest.fixture
 def auth(db):
-    # Explicit test-only opt-in (never the default -- see auth.py). Proving
-    # test_unregistered_number_does_not_leak still holds with this ON is a
-    # stronger check: the pre-existing-identity gate is what protects an
-    # unregistered number, not merely this flag being off.
-    return AuthService(db, dev_mock_sms_delivery=True)
+    return AuthService(
+        db, dev_mock_sms_delivery=True,
+        demo_access_key="synthetic-test-pairing-key-00000000",
+        demo_phone_numbers=["+971501110001"],
+    )
 
 
 @pytest.fixture
@@ -65,25 +65,27 @@ def test_duplicate_phone_is_rejected(db, people):
 
 
 def test_login_round_trip(auth, people):
-    requested = auth.request_code("+971501110001")
+    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
     result = auth.verify_code("+971501110001", requested["code"])
     assert auth.resolve(result["token"]).role == "driver"
 
 
 def test_unregistered_number_does_not_leak(auth, people):
-    assert "code" not in auth.request_code("+971509999999")
+    with pytest.raises(AuthError, match="pairing key"):
+        auth.request_code("+971509999999")
 
 
-def test_existing_account_code_is_not_leaked_by_default(db, people):
+def test_existing_account_code_is_not_leaked_by_default(db, people, monkeypatch):
     """The exact unauthorized-login vector: merely knowing a REGISTERED
     phone number must not be enough to fetch that account's login code,
     under the default (no explicit dev_mock_sms_delivery) configuration."""
+    monkeypatch.setattr("accident_risk.api.auth._send_real_sms", lambda phone, code: True)
     default_auth = AuthService(db)
     assert "code" not in default_auth.request_code("+971501110001")
 
 
 def test_code_is_single_use(auth, people):
-    requested = auth.request_code("+971501110001")
+    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
     auth.verify_code("+971501110001", requested["code"])
     with pytest.raises(AuthError):
         auth.verify_code("+971501110001", requested["code"])
@@ -91,7 +93,7 @@ def test_code_is_single_use(auth, people):
 
 def test_lockout_after_repeated_failures(auth, people):
     """Regression: the attempt counter must survive the raise that follows it."""
-    auth.request_code("+971501110001")
+    auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
     for _ in range(5):
         with pytest.raises(AuthError):
             auth.verify_code("+971501110001", "999999")
@@ -101,7 +103,7 @@ def test_lockout_after_repeated_failures(auth, people):
 
 
 def test_expired_code_is_refused(auth, db, people):
-    requested = auth.request_code("+971501110001")
+    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
     with db.connect() as connection:
         connection.execute(
             "UPDATE auth_codes SET expires_at = ? WHERE phone = ?",
@@ -112,7 +114,7 @@ def test_expired_code_is_refused(auth, db, people):
 
 
 def test_deactivating_a_user_invalidates_their_token(auth, db, people):
-    requested = auth.request_code("+971501110001")
+    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
     token = auth.verify_code("+971501110001", requested["code"])["token"]
     db.update_user(people["driver"]["id"], active=False)
     with pytest.raises(AuthError) as excinfo:
@@ -121,7 +123,7 @@ def test_deactivating_a_user_invalidates_their_token(auth, db, people):
 
 
 def test_secrets_are_not_stored_in_clear_text(auth, db, people):
-    requested = auth.request_code("+971501110001")
+    requested = auth.request_code("+971501110001", demo_key="synthetic-test-pairing-key-00000000")
     token = auth.verify_code("+971501110001", requested["code"])["token"]
     blob = db.path.read_bytes()
     assert token.encode() not in blob

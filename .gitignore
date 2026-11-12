@@ -21,3 +21,6 @@ artifacts/*
 
 # Local hardware recordings (GPS and wearable data)
 /data/recordings/
+
+# Swift package build output (never source or test evidence)
+/ios/.build/

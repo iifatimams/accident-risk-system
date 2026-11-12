@@ -17,12 +17,14 @@ def app(tmp_path, models):
         InferenceEngine(*models),
         database_path=tmp_path / "app.sqlite3",
         dev_mock_sms_delivery=True,
+        demo_access_key="synthetic-test-pairing-key-00000000",
+        demo_phone_numbers=[f"+971501110{i:03}" for i in (1, 2, 3, 20, 30, 31, 99)],
     )
 
 
 @pytest.fixture
 def client(app):
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={"X-RoadSense-Demo-Key": "synthetic-test-pairing-key-00000000"}) as test_client:
         yield test_client
 
 
