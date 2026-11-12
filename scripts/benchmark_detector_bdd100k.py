@@ -34,8 +34,9 @@ from torchvision.models.detection import (
 )
 from torchvision.transforms.functional import to_tensor
 
-IMAGES_DIR = Path("/tmp/bdd_audit/images/100k/val")
-LABELS_DIR = Path("/tmp/bdd_audit/labels_sample/100k/val")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+IMAGES_DIR = REPO_ROOT / "data/interim/bdd100k_frames/images"
+LABELS_DIR = REPO_ROOT / "data/interim/bdd100k_frames/labels"
 SCORE_THRESHOLD = 0.5
 IOU_THRESHOLD = 0.5
 
