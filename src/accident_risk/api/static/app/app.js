@@ -255,6 +255,18 @@ async function driveView() {
         <div style="font-family:monospace; font-size:13px; line-height:1.6;" id="cv-debug">
             Awaiting camera stream...
         </div>
+        <!-- RISK BREAKDOWN (Phase 9.1): named components, not just the one
+             number. Kept INSIDE this same card (not a separate grid item)
+             -- the "cv" grid-area this card uses is not one of
+             .drive-grid's declared areas (risk/session/readings/kit in
+             app.css), so a second element placed at grid-area:cv would
+             silently overlap this one instead of stacking below it. -->
+        <div style="margin-top:16px">
+          <h3 style="font-size:15px; margin-bottom:10px;">Risk breakdown (experimental)</h3>
+          <div id="risk-breakdown">
+              Awaiting an active driving session...
+          </div>
+        </div>
       </div>
 
       <div class="card area-readings">
@@ -281,17 +293,21 @@ async function refreshDriver() {
       const liveCV = await response.json();
       
       data.cv_eyes_on_road = liveCV.cv_eyes_on_road;
+      data.cv_attention_state = liveCV.cv_attention_state;
       data.cv_eyes_closed_sec = liveCV.cv_eyes_closed_sec;
       data.cv_traffic = liveCV.cv_traffic;
       data.cv_pedestrians_detected = liveCV.cv_pedestrians_detected;
       data.cv_pedestrian_count = liveCV.cv_pedestrian_count;
+      data.cv_pedestrian_hazard_state = liveCV.cv_pedestrian_hazard_state;
       data.cv_closing_fast = liveCV.cv_closing_fast;
+      data.cv_forward_hazard_state = liveCV.cv_forward_hazard_state;
       data.cv_camera_status = liveCV.cv_camera_status;
       data.cv_debug_face_detected = liveCV.cv_debug_face_detected;
       data.cv_debug_pitch = liveCV.cv_debug_pitch;
       data.cv_debug_yaw = liveCV.cv_debug_yaw;
       data.cv_debug_roll = liveCV.cv_debug_roll;
       data.cv_debug_ear = liveCV.cv_debug_ear;
+      data.risk_breakdown = liveCV.risk_breakdown;
   } catch (e) {
       console.log("CV feed unavailable yet");
   }
@@ -338,25 +354,37 @@ async function refreshDriver() {
   });
 
   const eyesOn = data.cv_eyes_on_road ?? null;
+  const attentionState = data.cv_attention_state ?? null;
   const eyesClosed = data.cv_eyes_closed_sec ?? null;
   const traffic = data.cv_traffic ?? null;
   const pedestriansDetected = data.cv_pedestrians_detected ?? null;
   const pedestrianCount = data.cv_pedestrian_count ?? null;
+  const pedestrianHazardState = data.cv_pedestrian_hazard_state ?? null;
   const closingFast = data.cv_closing_fast ?? null;
+  const forwardHazardState = data.cv_forward_hazard_state ?? null;
   const cameraStatus = data.cv_camera_status ?? null;
   const faceDetected = data.cv_debug_face_detected ?? null;
   const pitch = data.cv_debug_pitch ?? null;
   const yaw = data.cv_debug_yaw ?? null;
   const roll = data.cv_debug_roll ?? null;
   const ear = data.cv_debug_ear ?? null;
+  const riskBreakdown = data.risk_breakdown ?? null;
+
+  // snake_case wire values (DriverAttentionState.swift / ForwardCollisionHazard.swift /
+  // PedestrianHazard.swift payloadValue) -> a short display label. Experimental
+  // signals: labeled as such here, never implied to be validated/calibrated.
+  const stateLabel = (value) => value === null ? "Unavailable" : esc(String(value).replace(/_/g, " "));
 
   $("#cv-debug").innerHTML = `
       <strong>Camera status:</strong> ${cameraStatus === null ? "Unavailable" : esc(String(cameraStatus))}<br>
       <strong>Eyes on Road:</strong> ${eyesOn === null ? "Unavailable" : eyesOn ? "YES" : "NO (Possible distraction)"}<br>
+      <strong>Attention state (experimental):</strong> ${stateLabel(attentionState)}<br>
       <strong>Eyes Closed:</strong> ${eyesClosed === null ? "Unavailable" : `${num(eyesClosed, 1)}s`}<br>
       <strong>Traffic estimate:</strong> ${traffic === null ? "Unavailable" : esc(String(traffic).toUpperCase())}<br>
       <strong>Pedestrians:</strong> ${pedestriansDetected === null ? "Unavailable" : pedestriansDetected ? `YES (${pedestrianCount ?? "?"})` : "None detected"}<br>
+      <strong>Pedestrian hazard (experimental):</strong> ${stateLabel(pedestrianHazardState)}<br>
       <strong>Lead vehicle closing:</strong> ${closingFast === null ? "Unavailable" : closingFast ? "Possible" : "Not detected"}<br>
+      <strong>Forward hazard (experimental):</strong> ${stateLabel(forwardHazardState)}<br>
       <span style="opacity:0.7">
         -- raw diagnostics (for calibration) --<br>
         Face detected: ${faceDetected === null ? "n/a" : faceDetected ? "YES" : "NO"}<br>
@@ -366,6 +394,31 @@ async function refreshDriver() {
         Eye aspect ratio: ${ear === null ? "n/a" : num(ear, 3)} (closed if &lt; 0.18)
       </span>
   `;
+
+  const breakdownBox = $("#risk-breakdown");
+  if (breakdownBox) {
+    if (!riskBreakdown) {
+      breakdownBox.innerHTML = `<p class="muted">No risk breakdown available (requires an active, driving edge session).</p>`;
+    } else {
+      const rows = [
+        ["ML fusion (raw model output)", riskBreakdown.ml_fusion_base],
+        ["Jerk boost", riskBreakdown.jerk_boost],
+        ["Heart-rate velocity boost", riskBreakdown.hr_velocity_boost],
+        ["Traffic context", riskBreakdown.traffic_context],
+        ["Pedestrian context", riskBreakdown.pedestrian_context],
+        ["Eyes-closed penalty", riskBreakdown.eyes_closed_penalty],
+        ["Attention penalty", riskBreakdown.attention_penalty],
+        ["Lead-closing hard boost", riskBreakdown.lead_closing_hard_boost],
+      ];
+      breakdownBox.innerHTML = `
+        <p class="hint">Not a calibrated crash probability -- see each component's contribution below.</p>
+        <table><tbody>${rows.map(([label, value]) => `
+          <tr><td>${esc(label)}</td><td>${num(value, 2)}</td></tr>`).join("")}
+          ${riskBreakdown.false_positive_suppression_applied ? "<tr><td colspan=2><em>False-positive suppression applied (roundabout/swerve)</em></td></tr>" : ""}
+          ${riskBreakdown.hard_override_applied ? "<tr><td colspan=2><em>Hard override applied (eyes closed 3s+)</em></td></tr>" : ""}
+        </tbody></table>`;
+    }
+  }
 
   $("#links").innerHTML = [
     ["Vehicle adapter", data.vehicle_connected, "OBD-II over Bluetooth"],

@@ -859,6 +859,47 @@ passed** (12 new). `pytest`: **177 passed** (unaffected -- this work
 didn't touch any tested Python behavior, only documentation). No
 Android, `data/raw`, or real-database changes.
 
-## Phases 11-19
+## Phase 16 -- Dashboard completion: PARTIALLY DONE
+
+Audited `static/app/app.js` against the richer signals added earlier this
+session (Phase 2 `attention_state`, Phase 6 `forward_hazard_state`, Phase
+7 `pedestrian_hazard_state`, Phase 9.1 `risk_breakdown`) and found the
+dashboard only ever rendered the legacy booleans (`eyes_on_road`,
+`traffic`, `closing_fast`) -- none of the new discrete states or the risk
+breakdown were wired into the UI at all, despite already round-tripping
+through the backend. Added all four to the driver dashboard's "Vision
+Diagnostics" card, each labeled "(experimental)" so they read as research
+signals, not validated features, and a new "Risk breakdown (experimental)"
+section listing every named component from Phase 9.1 with an explicit
+"not a calibrated crash probability" note.
+
+**Verified in an actual browser, not just by reading the diff**: launched
+a throwaway server against a temp sqlite file (never `data/app.sqlite3`),
+seeded one synthetic driver/session/frame carrying every new field, and
+visually inspected the rendered dashboard. Caught and fixed a real
+mistake this way: a first attempt placed the risk-breakdown content in a
+SEPARATE card sharing the same (invalid, undeclared) `grid-area: cv` as
+the existing Vision Diagnostics card, which would have made the two
+silently overlap -- moved it inside the same card instead. (A second,
+confusing-looking overlap during testing turned out to be this SPA not
+reloading its script on hash-only navigation, not a real bug -- confirmed
+by fetching the live-served file directly and diffing it against what the
+stale page had actually executed, then forcing a real page navigation.)
+
+What's NOT done: an operator/manager-facing view of these same fields
+(this session only touched the driver's own `/app/#/drive` view), a
+simulation-mode banner/data-provenance labeling (Phase 16's "distinguish
+live/stale/unknown/simulated data" -- there is no simulation mode built
+yet, Phase 8, so nothing to label), and map-data source/freshness display
+(Phase 10's new `isDesignSpeedFromMapData`/`isWeatherLiveData` flags are
+not yet wired to any dashboard element).
+
+Verification: `pytest`: **177 passed** (unaffected -- static JS has no
+Python test coverage; verified instead by a real, isolated, throwaway
+server + browser inspection, cleaned up afterward). `node --check`
+confirms the file is syntactically valid JS. No Android, `data/raw`, or
+real-database changes -- the preview server used a temp sqlite file.
+
+## Phases 11-19 (except 16, above)
 
 Not started.
