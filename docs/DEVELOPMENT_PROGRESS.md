@@ -521,6 +521,100 @@ Remaining checkpoint resume tasks (#4 lifecycle enforcement for
 confirm/cancel, #5 iOS lifecycle tests, #6 family monitoring UI/real
 provider, #7 research consent/export verification) are not started.
 
-## Phases 5-19
+## Phase 5 -- Temporal object tracking: IMPLEMENTED (logic-complete, pending a real detector)
 
-Not started.
+Added `ios/RoadSense/Services/TemporalTracker.swift`: a pure, unit-tested
+greedy IoU tracker (`ObjectTracker`) that assigns persistent identity to
+per-frame detections across time -- same greedy per-class IoU matching
+strategy already used (and already documented as a simplification) in the
+BDD100K benchmark scripts, applied across time instead of across a
+prediction/ground-truth pair. Handles the directive's explicit asks:
+object persistence (a track survives up to `maxMissedFrames` consecutive
+missed detections without losing its identity -- directly fixes what
+would otherwise be "a 1-frame miss creates a brand-new car"), bounded
+history per track (for Phase 6's size-over-time calculation), and uses
+real per-frame timestamps throughout, never an assumed fixed FPS.
+
+Wired into `BackgroundCaptureService.processRoadTraffic`: the existing
+car-like-rectangle heuristic's detections now feed the tracker every
+frame, and the largest car-class track is published as `leadTrack`.
+
+**Explicitly NOT fixed**: the input is still the same crude aspect-ratio
+rectangle heuristic documented as unreliable since the Phase 1 checkpoint
+("Rectangle detection cannot reliably identify cars"). Tracking gives that
+heuristic *persistent identity*, not *correctness* -- a consistently
+wrong detection is now a consistently wrong TRACK. This is why Phase 6
+below stays deliberately conservative rather than trusting this input.
+
+8 new Swift tests (`TemporalTrackerTests`): new-track creation, identity
+preserved across a matching frame, different classes never merge into one
+track, a single missed frame does not fragment a track, a track IS
+dropped after exceeding `maxMissedFrames`, and history is bounded.
+
+## Phase 6 -- Forward collision-risk estimation: IMPLEMENTED (experimental)
+
+Added `ios/RoadSense/Services/ForwardCollisionHazard.swift`. Per the
+directive's own instruction ("a monocular camera cannot automatically
+provide trustworthy absolute distance... do not fabricate depth or claim
+precise metres"), this never attempts to estimate metric distance.
+Instead it uses **optical time-to-contact** (apparent-size growth rate,
+sometimes called Lee's tau in the perception literature): while a tracked
+object is genuinely growing larger in the frame, dividing its current
+apparent size by its own growth rate gives a time-until-contact estimate
+that needs no absolute size or distance calibration at all -- a real,
+established technique, not invented for this project. The real
+assumptions behind it (roughly constant physical size, roughly constant
+closing velocity, needs the object tracked face-on rather than mostly
+turning) are stated directly in the module's doc comments, not hidden.
+
+Produces exactly the hazard states the directive asked for:
+`noRelevantLeadObject`, `leadObjectTracked`, `possibleClosingMotion`,
+`increasingClosingHazard`, `insufficientEvidence`. Deliberately
+conservative: below a minimum ego speed, or without enough tracked
+history, it never escalates past `leadObjectTracked` -- it does not
+guess "closing" from an ambiguous signal, and does not assume a lead
+object is safe just because speed/history data happens to be missing.
+Classification happens in `BackgroundCaptureService.sendCurrentSnapshot`
+(not inside `VisionManager`), since it needs ego speed, which only that
+layer has. The pre-existing `leadClosingFast` boolean (previously always
+hardcoded `false`, with a comment saying why) is now actually derived
+from this -- true only for the strongest (`increasingClosingHazard`)
+state -- and the new discrete `forwardHazardState` rounds-trips to the
+backend's live dashboard (`cv_forward_hazard_state`), same pattern as
+Phase 2's `attention_state`.
+
+13 new Swift tests: `OpticalExpansionTests` (5 -- including a known-value
+check: size growing 0.1->0.2 over 1s must yield exactly a 2.0s TTC, a
+monotonicity check that faster growth yields shorter TTC, and confirms
+static/shrinking objects and too-little history never produce a number)
+and `ClassifyForwardHazardTests` (8 -- corridor filtering, insufficient
+evidence, low/missing ego speed never escalating, and the two closing
+states firing only with sufficient speed AND sufficient apparent growth).
+Plus 1 new Python test confirming `forward_hazard_state` actually
+round-trips through `/ingest` -> `/api/v1/predict/live` rather than being
+silently dropped (same pattern as the existing `attention_state` test).
+
+**What this is NOT**: a validated collision-prediction feature. It is
+explicitly gated on Phase 4.4 (a real exported detector) actually
+happening before its output should be trusted for anything beyond
+internal research/dashboard display. The directive's own Phase 11
+distinction applies here too: this is "implemented and integrated," not
+"validated on held-out real data" or "demonstrated reliably" -- those
+need actual driving data with labeled lead-vehicle approach events, which
+does not exist in this environment. The synthetic fixture integrated
+earlier this session (`lead_vehicle_nearmiss`/`lead_vehicle_collision`
+scenarios) has `lead_distance_m_truth` ground truth that could evaluate
+this honestly in a follow-up -- not attempted yet.
+
+Verification: `xcodebuild` (Debug/iphonesimulator): **BUILD SUCCEEDED**.
+`cd ios && swift test`: **53 passed** (21 new: 8 tracker + 13 hazard/TTC).
+`.venv/bin/python -m pytest -q`: **172 passed** (1 new). No Android,
+`data/raw`, or real-database changes.
+
+## Phases 7-19
+
+Not started. Phase 7 (pedestrian collision-risk estimation) is a natural
+next step given the real `VNDetectHumanRectanglesRequest` pedestrian
+detector already in use (unlike vehicles, this one IS a validated Apple
+detector, not a heuristic) and the tracker/hazard infrastructure just
+built above, which Phase 7 can reuse directly.
