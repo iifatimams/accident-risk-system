@@ -337,11 +337,21 @@ class SessionRecorder:
             "physiology_signal_quality": frame.physiology_signal_quality,
             "sensor_timestamps": frame.sensor_timestamps,
             "eyes_on_road": camera.get("eyes_on_road"),
+            # Discrete states behind the three booleans above -- see
+            # DriverAttentionState.swift (Phase 2), ForwardCollisionHazard.swift
+            # (Phase 6), and PedestrianHazard.swift (Phase 7). Added to the
+            # research export so the richer signal isn't lost for sessions
+            # recorded after those features shipped; older sessions simply
+            # have these as null, same as any other sensor that wasn't
+            # present yet.
+            "attention_state": camera.get("attention_state"),
             "eyes_closed_sec": camera.get("eyes_closed_sec"),
             "traffic_level": camera.get("traffic_level"),
             "pedestrians_detected": camera.get("pedestrians_detected"),
             "pedestrian_count": camera.get("pedestrian_count"),
+            "pedestrian_hazard_state": camera.get("pedestrian_hazard_state"),
             "lead_closing_fast": camera.get("lead_closing_fast"),
+            "forward_hazard_state": camera.get("forward_hazard_state"),
             "warning_fired": warning_fired,
         }
         if prediction is not None:

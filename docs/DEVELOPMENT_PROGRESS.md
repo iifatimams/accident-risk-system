@@ -557,9 +557,52 @@ reaching the family notification message.
 Verification: `.venv/bin/python -m pytest -q`: **177 passed** (3 new).
 No Android, `data/raw`, or real-database changes.
 
+### #7: research consent/export verification -- AUDITED, mostly already correct, one real gap closed
+
+Audited the existing research consent/export pipeline
+(`routes_app.py`'s `_prepare_export`/`export_session_json`/
+`export_session_csv`, `recorder.py`'s `_add_research_sample`) against
+Phase 17's full checklist, with an already-thorough existing test
+(`test_research_export_requires_consent_is_authorized_and_pseudonymous`)
+to verify against. Found this area was already well-built: consent gates
+export regardless of role (a manager can't export a participant's data
+just because they can see the session), pseudonymous participant ids
+stable across exports/roles, precise GPS blanked unless
+`include_location=true` AND account_manager+, missing sensors stay null
+(never coerced to 0), and revocation stops future recording without
+deleting past rows (verified directly against the database, not just the
+blocked export endpoint).
+
+**One real, concrete gap found and fixed**: the Phase 2/6/7 discrete
+states added earlier this session (`attention_state`,
+`forward_hazard_state`, `pedestrian_hazard_state`) were never added to
+the research export pipeline -- `_add_research_sample` didn't read them
+from `camera`, and `EXPORT_COLUMNS` didn't list them, so a researcher
+exporting a session recorded with those features would silently lose
+the richer signal (keeping only the three legacy booleans). Fixed both.
+
+**Also closed a real, previously-nonexistent gap in Phase 17's own
+checklist**: "dataset versioning. reproducible experiment manifests" did
+not exist in this API at all. Added `EXPORT_SCHEMA_VERSION` (bumped
+whenever `EXPORT_COLUMNS` changes shape) and a `manifest` object in every
+JSON export (`export_schema_version`, the exact `columns` list, `row_count`,
+`generated_at`) so a researcher comparing two exports can tell "this
+column is null because it wasn't recorded" apart from "this export
+predates that column." The CSV export carries the same version via an
+`X-Export-Schema-Version` header and in its filename
+(`..._schema_v2.csv`), since CSV has no manifest object of its own.
+
+Extended the existing camera-features export test to cover the three new
+fields and the manifest/versioning; no new test file needed.
+
+Verification: `.venv/bin/python -m pytest -q`: **177 passed** (test
+extended in place, not a net-new count). No Android, `data/raw`, or
+real-database changes.
+
 Remaining checkpoint resume tasks (#5 iOS lifecycle tests, #6 family
-monitoring UI/real provider, #7 research consent/export verification)
-are not started.
+monitoring UI/real provider) are not started. #6 was explicitly deferred
+by the user's own instruction this session ("the family notification
+thingy can be added later").
 
 ## Phase 5 -- Temporal object tracking: IMPLEMENTED (logic-complete, pending a real detector)
 

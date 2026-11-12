@@ -300,10 +300,13 @@ def test_research_export_carries_camera_derived_features(client, people, monkeyp
         "risk_active": True,
         "risk_score": 42,
         "eyes_on_road": False,
+        "attention_state": "looking_down",
         "traffic_level": "moderate",
         "pedestrians_detected": True,
         "pedestrian_count": 2,
+        "pedestrian_hazard_state": "entering_conflict_zone",
         "lead_closing_fast": True,
+        "forward_hazard_state": "increasing_closing_hazard",
     }
     assert client.post("/ingest", json=frame).status_code == 200
 
@@ -311,11 +314,30 @@ def test_research_export_carries_camera_derived_features(client, people, monkeyp
     assert len(export["rows"]) > 0
     row = export["rows"][0]
     assert row["eyes_on_road"] is False
+    assert row["attention_state"] == "looking_down"
     assert row["traffic_level"] == "moderate"
     assert row["pedestrians_detected"] is True
     assert row["pedestrian_count"] == 2
+    assert row["pedestrian_hazard_state"] == "entering_conflict_zone"
     assert row["lead_closing_fast"] is True
+    assert row["forward_hazard_state"] == "increasing_closing_hazard"
     assert row["overall_risk_index"] == pytest.approx(0.42)
+
+    # Phase 17 (checkpoint resume #7): dataset versioning / reproducible
+    # export manifests -- a researcher comparing two exports needs to know
+    # whether a missing column means "not recorded" or "predates this
+    # export format."
+    manifest = export["manifest"]
+    assert manifest["export_schema_version"]
+    assert "attention_state" in manifest["columns"]
+    assert manifest["row_count"] == len(export["rows"])
+    assert manifest["generated_at"] > 0
+
+    csv_export = client.get(f"/app/api/sessions/{session_id}/export.csv", headers=headers)
+    assert csv_export.status_code == 200
+    assert csv_export.headers["x-export-schema-version"] == manifest["export_schema_version"]
+    assert f"_schema_v{manifest['export_schema_version']}.csv" in csv_export.headers["content-disposition"]
+    assert "attention_state" in csv_export.text.splitlines()[0]
 
 
 def test_drivers_only_see_their_own_sessions(client, people):
