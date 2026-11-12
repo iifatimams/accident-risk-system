@@ -119,3 +119,29 @@ def test_forward_hazard_state_round_trips_through_live_dashboard(tmp_path):
     data = client.get("/api/v1/predict/live?stream_id=driver-2").json()
     assert data["cv_closing_fast"] is True
     assert data["cv_forward_hazard_state"] == "increasing_closing_hazard"
+
+
+def test_pedestrian_hazard_state_round_trips_through_live_dashboard(tmp_path):
+    """cv_pedestrian_hazard_state is dashboard-only diagnostics (see
+    PedestrianHazard.swift / Phase 7); defaults to "insufficient_evidence"
+    and must not be silently dropped when sent."""
+    client = TestClient(
+        create_app(InferenceEngine(), database_path=tmp_path / "test_pedestrian_hazard.sqlite3")
+    )
+    default_only = client.get("/api/v1/predict/live?stream_id=none-yet").json()
+    assert default_only["cv_pedestrian_hazard_state"] == "insufficient_evidence"
+
+    frame = dict(
+        timestamp=time.time(),
+        source="ios",
+        stream_id="driver-3",
+        risk_active=True,
+        risk_score=10,
+        pedestrians_detected=True,
+        pedestrian_count=1,
+        pedestrian_hazard_state="entering_conflict_zone",
+    )
+    assert client.post("/ingest", json=frame).status_code == 200
+    data = client.get("/api/v1/predict/live?stream_id=driver-3").json()
+    assert data["cv_pedestrians_detected"] is True
+    assert data["cv_pedestrian_hazard_state"] == "entering_conflict_zone"

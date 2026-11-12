@@ -54,6 +54,11 @@ public struct SensorFrame: Codable {
     public var trafficLevel: String = "empty"
     public var pedestriansDetected: Bool = false
     public var pedestrianCount: Int = 0
+    // Discrete reading combining pedestrian position/motion, e.g.
+    // "entering_conflict_zone", "roadside_visible" -- see
+    // PedestrianHazard.swift (Phase 7). The most severe of any currently
+    // tracked pedestrians, never a claim about a specific future path.
+    public var pedestrianHazardState: String = "insufficient_evidence"
     public var eyesClosedSec: Double = 0.0
     public var cameraStatus: String = "idle"
     public var debugFaceDetected: Bool = false
@@ -145,6 +150,7 @@ public struct SensorFrame: Codable {
         dict["traffic_level"] = trafficLevel
         dict["pedestrians_detected"] = pedestriansDetected
         dict["pedestrian_count"] = pedestrianCount
+        dict["pedestrian_hazard_state"] = pedestrianHazardState
         dict["eyes_closed_sec"] = eyesClosedSec
         dict["camera_status"] = cameraStatus
         dict["debug_face_detected"] = debugFaceDetected

@@ -263,6 +263,11 @@ def create_app(
                     "traffic_level": body.get("traffic_level", "empty"),
                     "pedestrians_detected": body.get("pedestrians_detected", False),
                     "pedestrian_count": body.get("pedestrian_count", 0),
+                    # Discrete reading combining pedestrian position/motion
+                    # -- see ios/RoadSense/Services/PedestrianHazard.swift
+                    # (Phase 7). The most severe of any currently tracked
+                    # pedestrians.
+                    "pedestrian_hazard_state": body.get("pedestrian_hazard_state", "insufficient_evidence"),
                     "lead_closing_fast": body.get("lead_closing_fast", False),
                     # Discrete reading behind lead_closing_fast -- see
                     # ios/RoadSense/Services/ForwardCollisionHazard.swift
@@ -457,6 +462,7 @@ def create_app(
             result["cv_traffic"] = ui_data.get("traffic_level", "empty")
             result["cv_pedestrians_detected"] = ui_data.get("pedestrians_detected", False)
             result["cv_pedestrian_count"] = ui_data.get("pedestrian_count", 0)
+            result["cv_pedestrian_hazard_state"] = ui_data.get("pedestrian_hazard_state", "insufficient_evidence")
             result["cv_closing_fast"] = ui_data.get("lead_closing_fast", False)
             result["cv_forward_hazard_state"] = ui_data.get("forward_hazard_state", "no_relevant_lead_object")
             result["cv_camera_status"] = ui_data.get("camera_status", "idle")
