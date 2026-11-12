@@ -26,6 +26,20 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   @Published public var debugYaw: Double = 0.0
   @Published public var debugRoll: Double = 0.0
   @Published public var debugEAR: Double = 0.0
+  // MARK: Driver Attention
+  // Discrete state (see DriverAttentionState.swift) debounced through
+  // AttentionHysteresis. `eyesOnRoad` above is kept for backend/dashboard
+  // compatibility and is now always derived from this, not tracked
+  // separately -- see processDriverFace.
+  @Published public var attentionState: DriverAttentionState = .attentive
+  private var attentionHysteresis = AttentionHysteresis(
+    enterDwell: 1.5,
+    // Not empirically tuned -- there is no labeled real-driving dataset
+    // available to calibrate against. This fixes a real bug (see
+    // DriverAttentionState.swift) but the exact value is a starting point
+    // for on-device tuning, not a validated number.
+    exitDwell: 0.5
+  )
   // MARK: Mounting + Performance Diagnostics
   // Added so capture FPS, processing latency and mounting orientation can
   // actually be measured on a real device instead of assumed. These are
@@ -52,10 +66,7 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   private var frontConnection: AVCaptureConnection?
   private var backConnection: AVCaptureConnection?
   private var eyesClosedStart: Date?
-  private var distractedStartTime: Date?
   private var fixedGazeStart: Date?
-  private var noFaceStartTime: Date?
-  private let distractionThresholdSeconds: TimeInterval = 1.5
   private var lastPitch: Double = 0.0
   private var lastYaw: Double = 0.0
   public override init() {
@@ -184,13 +195,13 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   // closed before you start moving carries straight into the trip and can
   // immediately trip the hard "prolonged eye closure" override.
   public func resetDrivingState() {
-    noFaceStartTime = nil
+    attentionHysteresis = AttentionHysteresis(enterDwell: attentionHysteresis.enterDwell, exitDwell: attentionHysteresis.exitDwell)
     Task { @MainActor in
       self.eyesClosedStart = nil
-      self.distractedStartTime = nil
       self.fixedGazeStart = nil
       self.eyesClosedSec = 0.0
       self.eyesOnRoad = true
+      self.attentionState = .attentive
     }
   }
   public func stopCamera() {
@@ -198,14 +209,14 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     UIDevice.current.endGeneratingDeviceOrientationNotifications()
     multiCamSession?.stopRunning()
     multiCamSession = nil
-    distractedStartTime = nil
+    attentionHysteresis = AttentionHysteresis(enterDwell: attentionHysteresis.enterDwell, exitDwell: attentionHysteresis.exitDwell)
     eyesClosedStart = nil
     fixedGazeStart = nil
-    noFaceStartTime = nil
     frontFrameTimestamps.removeAll()
     backFrameTimestamps.removeAll()
     Task { @MainActor in
       self.eyesOnRoad = true
+      self.attentionState = .attentive
       self.eyesClosedSec = 0.0
       self.postureCollapse = false
       self.fixedGaze = false
@@ -472,34 +483,27 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     } catch {
       return
     }
+    let now = Date().timeIntervalSince1970
     guard
       let face = (landmarksRequest.results as? [VNFaceObservation])?.first
     else {
-      // A missing face is ambiguous on its own -- a blink, a bump,
-      // or a momentary tracking miss can drop a single frame even
-      // while the driver is looking straight ahead. But a face that
-      // stays missing is usually the driver turned far enough away
-      // (or looking down at a phone) that the front camera can no
-      // longer frame it at all -- the exact case we need to flag as
-      // NOT on the road. Previously this branch forced
-      // eyesOnRoad = true immediately, which meant looking away hard
-      // enough to defeat face detection was reported as the safest
-      // possible state. Treat a sustained miss the same way sustained
-      // distraction is treated below.
+      // A missing face is ambiguous on its own -- a blink, a bump, or a
+      // momentary tracking miss can drop a single frame even while the
+      // driver is looking straight ahead. AttentionHysteresis (not this
+      // call site) is what decides whether a miss is sustained enough to
+      // actually report faceNotDetected/not-eyes-on-road; it requires the
+      // SAME sustained evidence to clear back to attentive, so one stray
+      // re-detection mid-turn can no longer instantly cancel a real
+      // sustained loss (see DriverAttentionState.swift for why that
+      // mattered).
+      let committed = attentionHysteresis.update(instantaneous: .faceNotDetected, now: now)
       Task { @MainActor in
         self.debugFaceDetected = false
         self.eyesClosedStart = nil
         self.eyesClosedSec = 0.0
         self.postureCollapse = false
-        if self.noFaceStartTime == nil {
-          self.noFaceStartTime = Date()
-        }
-        if let start = self.noFaceStartTime,
-          Date().timeIntervalSince(start)
-            > self.distractionThresholdSeconds
-        {
-          self.eyesOnRoad = false
-        }
+        self.attentionState = committed
+        self.eyesOnRoad = committed.isEyesOnRoad
       }
       return
     }
@@ -520,8 +524,6 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       poseFace?.roll?.doubleValue
       ?? face.roll?.doubleValue
       ?? 0.0
-    let isDistracted =
-      (pitch < -0.4) || (abs(yaw) > 0.45)
     let isCollapsed =
       (pitch < -0.8) || (abs(roll) > 0.7)
     let leftEAR = self.getEyeOpenness(
@@ -531,29 +533,25 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       eye: face.landmarks?.rightEye
     )
     let avgEAR = (leftEAR + rightEAR) / 2.0
-    let isEyesClosed = avgEAR < 0.18
+    let isEyesClosed = avgEAR < GazeThresholds.default.earClosed
+    let instantaneous = classifyGaze(
+      pitch: pitch,
+      yaw: yaw,
+      roll: roll,
+      eyeAspectRatio: avgEAR,
+      faceDetected: true,
+      confidence: face.confidence
+    )
+    let committed = attentionHysteresis.update(instantaneous: instantaneous, now: now)
     Task { @MainActor in
-      self.noFaceStartTime = nil
       self.debugFaceDetected = true
       self.debugPitch = pitch
       self.debugYaw = yaw
       self.debugRoll = roll
       self.debugEAR = avgEAR
       self.postureCollapse = isCollapsed
-      if isDistracted {
-        if self.distractedStartTime == nil {
-          self.distractedStartTime = Date()
-        }
-        if let start = self.distractedStartTime,
-          Date().timeIntervalSince(start)
-            > self.distractionThresholdSeconds
-        {
-          self.eyesOnRoad = false
-        }
-      } else {
-        self.distractedStartTime = nil
-        self.eyesOnRoad = true
-      }
+      self.attentionState = committed
+      self.eyesOnRoad = committed.isEyesOnRoad
       if isEyesClosed {
         if self.eyesClosedStart == nil {
           self.eyesClosedStart = Date()
@@ -852,6 +850,8 @@ public class BackgroundCaptureService:
       DispatchQueue.main.sync {
         snapshot.eyesOnRoad =
           self.visionManager.eyesOnRoad
+        snapshot.attentionState =
+          self.visionManager.attentionState.payloadValue
         snapshot.eyesClosedSec =
           self.visionManager.eyesClosedSec
         snapshot.postureCollapse =

@@ -69,3 +69,28 @@ def test_invalid_packets_and_reset(tmp_path):
     legacy = dict(packet, stream_id="hardware-legacy")
     assert client.post("/ingest", json=legacy | {"speed": 40}).status_code == 200
     assert client.get("/api/v1/predict/live?stream_id=hardware-legacy").json()["speed"] == 40
+
+
+def test_attention_state_round_trips_through_live_dashboard(tmp_path):
+    """cv_attention_state is dashboard-only diagnostics (see
+    DriverAttentionState.swift / Phase 2); defaults to "attentive" when a
+    client never sends it, and must not be silently dropped when it does."""
+    client = TestClient(
+        create_app(InferenceEngine(), database_path=tmp_path / "test_attention_state.sqlite3")
+    )
+    default_only = client.get("/api/v1/predict/live?stream_id=none-yet").json()
+    assert default_only["cv_attention_state"] == "attentive"
+
+    frame = dict(
+        timestamp=time.time(),
+        source="ios",
+        stream_id="driver-1",
+        risk_active=True,
+        risk_score=10,
+        eyes_on_road=False,
+        attention_state="looking_down",
+    )
+    assert client.post("/ingest", json=frame).status_code == 200
+    data = client.get("/api/v1/predict/live?stream_id=driver-1").json()
+    assert data["cv_eyes_on_road"] is False
+    assert data["cv_attention_state"] == "looking_down"
