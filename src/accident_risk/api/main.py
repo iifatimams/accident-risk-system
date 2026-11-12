@@ -264,6 +264,12 @@ def create_app(
                     "pedestrians_detected": body.get("pedestrians_detected", False),
                     "pedestrian_count": body.get("pedestrian_count", 0),
                     "lead_closing_fast": body.get("lead_closing_fast", False),
+                    # Discrete reading behind lead_closing_fast -- see
+                    # ios/RoadSense/Services/ForwardCollisionHazard.swift
+                    # (Phase 6). Experimental, derived from a still-crude
+                    # rectangle-heuristic detection, never a calibrated
+                    # collision probability.
+                    "forward_hazard_state": body.get("forward_hazard_state", "no_relevant_lead_object"),
                     "camera_status": body.get("camera_status", "idle"),
                     "debug_face_detected": body.get("debug_face_detected", False),
                     "debug_pitch": body.get("debug_pitch", 0.0),
@@ -452,6 +458,7 @@ def create_app(
             result["cv_pedestrians_detected"] = ui_data.get("pedestrians_detected", False)
             result["cv_pedestrian_count"] = ui_data.get("pedestrian_count", 0)
             result["cv_closing_fast"] = ui_data.get("lead_closing_fast", False)
+            result["cv_forward_hazard_state"] = ui_data.get("forward_hazard_state", "no_relevant_lead_object")
             result["cv_camera_status"] = ui_data.get("camera_status", "idle")
             result["cv_debug_face_detected"] = ui_data.get("debug_face_detected", False)
             result["cv_debug_pitch"] = ui_data.get("debug_pitch", 0.0)

@@ -94,3 +94,28 @@ def test_attention_state_round_trips_through_live_dashboard(tmp_path):
     data = client.get("/api/v1/predict/live?stream_id=driver-1").json()
     assert data["cv_eyes_on_road"] is False
     assert data["cv_attention_state"] == "looking_down"
+
+
+def test_forward_hazard_state_round_trips_through_live_dashboard(tmp_path):
+    """cv_forward_hazard_state is dashboard-only diagnostics (see
+    ForwardCollisionHazard.swift / Phase 6); defaults to
+    "no_relevant_lead_object" and must not be silently dropped when sent."""
+    client = TestClient(
+        create_app(InferenceEngine(), database_path=tmp_path / "test_forward_hazard.sqlite3")
+    )
+    default_only = client.get("/api/v1/predict/live?stream_id=none-yet").json()
+    assert default_only["cv_forward_hazard_state"] == "no_relevant_lead_object"
+
+    frame = dict(
+        timestamp=time.time(),
+        source="ios",
+        stream_id="driver-2",
+        risk_active=True,
+        risk_score=10,
+        lead_closing_fast=True,
+        forward_hazard_state="increasing_closing_hazard",
+    )
+    assert client.post("/ingest", json=frame).status_code == 200
+    data = client.get("/api/v1/predict/live?stream_id=driver-2").json()
+    assert data["cv_closing_fast"] is True
+    assert data["cv_forward_hazard_state"] == "increasing_closing_hazard"

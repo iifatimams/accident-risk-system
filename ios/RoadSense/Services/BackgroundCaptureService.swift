@@ -18,6 +18,15 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   @Published public var pedestriansDetected: Bool = false
   @Published public var pedestrianCount: Int = 0
   @Published public var cameraStatus: String = "idle"
+  // MARK: Forward Collision Estimation (Phase 5/6)
+  // The current best "lead vehicle" candidate, if any: the largest
+  // car-class track from vehicleTracker below. Published as the raw track
+  // (not yet classified into a ForwardHazardState) because classification
+  // needs ego speed, which lives on BackgroundCaptureService, not here --
+  // see sendCurrentSnapshot. Deliberately NOT claiming a hazard verdict at
+  // this layer.
+  @Published public var leadTrack: TrackedObject?
+  private var vehicleTracker = ObjectTracker()
   // Raw diagnostic values. These exist so the thresholds below can be
   // calibrated against real readings (phone mount angle, lighting) instead
   // of guessed blind. Watch these on the dashboard while driving/parked.
@@ -214,6 +223,7 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     fixedGazeStart = nil
     frontFrameTimestamps.removeAll()
     backFrameTimestamps.removeAll()
+    vehicleTracker = ObjectTracker()
     Task { @MainActor in
       self.eyesOnRoad = true
       self.attentionState = .attentive
@@ -222,6 +232,7 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       self.fixedGaze = false
       self.trafficLevel = "empty"
       self.leadClosingFast = false
+      self.leadTrack = nil
       self.sluggishGaze = false
       self.pedestriansDetected = false
       self.pedestrianCount = 0
@@ -602,6 +613,28 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         // Disable this collision cue until a
         // validated object detector is available.
         self.leadClosingFast = false
+        // Phase 5/6: track car-like rectangles across frames and surface
+        // the largest one as the lead-vehicle candidate. This inherits the
+        // SAME limitation as leadClosingFast above -- these are still
+        // crude aspect-ratio rectangles, not a validated detector -- which
+        // is exactly why classification into an actual hazard verdict
+        // (ForwardCollisionHazard.swift, applied in sendCurrentSnapshot)
+        // stays conservative rather than trusting this track's identity.
+        let detections = carRects.map {
+          Detection(
+            classLabel: "car",
+            box: NormalizedRect(
+              x: $0.boundingBox.origin.x, y: $0.boundingBox.origin.y,
+              width: $0.boundingBox.width, height: $0.boundingBox.height
+            ),
+            confidence: $0.confidence
+          )
+        }
+        let tracks = self.vehicleTracker.update(
+          detections: detections, at: Date().timeIntervalSince1970
+        )
+        self.leadTrack = tracks.filter { $0.classLabel == "car" }
+          .max { $0.box.area < $1.box.area }
       }
     }
     vehicleRequest.minimumSize = 0.1
@@ -680,6 +713,9 @@ public class BackgroundCaptureService:
   // confirm/dismiss prompt, independent of polling the server's
   // pending_collision status.
   @Published public private(set) var suspectedCollision: CollisionSuspicion?
+  // Phase 6: classified here, not in VisionManager, because classification
+  // needs ego speed (vehicle/GPS), which is only known at this layer.
+  @Published public private(set) var forwardHazardState: ForwardHazardState = .noRelevantLeadObject
   public var serverUrl: String = ServerConfig.activeBaseUrl
   private var currentFrame = SensorFrame(streamId: "")
   private var streamTimer: Timer?
@@ -847,7 +883,9 @@ public class BackgroundCaptureService:
         )
       }
       // MARK: Vision Snapshot
+      var leadTrackSnapshot: TrackedObject?
       DispatchQueue.main.sync {
+        leadTrackSnapshot = self.visionManager.leadTrack
         snapshot.eyesOnRoad =
           self.visionManager.eyesOnRoad
         snapshot.attentionState =
@@ -908,6 +946,23 @@ public class BackgroundCaptureService:
         : (gpsSpeedMps != nil ? "gps" : nil)
       let speedMps = measuredSpeedMps ?? 0.0
       let speedKmh = speedMps * 3.6
+      // MARK: Forward Collision Estimation (Phase 6)
+      // nil (not 0.0) when speed is genuinely unknown, so
+      // classifyForwardHazard's "insufficient context" path is distinct
+      // from "measured, actually near zero."
+      let hazard = classifyForwardHazard(
+        leadTrack: leadTrackSnapshot,
+        egoSpeedKmh: measuredSpeedMps != nil ? speedKmh : nil
+      )
+      snapshot.forwardHazardState = hazard.payloadValue
+      // Backward-compatible boolean, now actually derived instead of the
+      // hardcoded `false` VisionManager still publishes on its own (it
+      // lacks speed context to know this itself) -- only the strongest
+      // hazard state counts as "closing fast."
+      snapshot.leadClosingFast = (hazard == .increasingClosingHazard)
+      DispatchQueue.main.async { [weak self] in
+        self?.forwardHazardState = hazard
+      }
       // MARK: Driving State Detection
       // Require at least 8 km/h for 3 seconds
       // before activating on-device predictions.
@@ -1329,6 +1384,7 @@ public class BackgroundCaptureService:
       self.isRunning = false
       self.isObdConnected = false
       self.isWhoopConnected = false
+      self.forwardHazardState = .noRelevantLeadObject
     }
   }
 }

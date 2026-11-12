@@ -45,6 +45,12 @@ public struct SensorFrame: Codable {
     // simple Codable/dictionary payload shape, matching every other field.
     public var attentionState: String = "attentive"
     public var leadClosingFast: Bool = false
+    // Discrete reading behind leadClosingFast, e.g. "possible_closing_motion",
+    // "insufficient_evidence" -- see ForwardCollisionHazard.swift (Phase 6).
+    // Experimental: derived from a monocular optical time-to-contact
+    // estimate over a still-crude rectangle-heuristic car detection, not a
+    // validated detector -- never a calibrated collision probability.
+    public var forwardHazardState: String = "no_relevant_lead_object"
     public var trafficLevel: String = "empty"
     public var pedestriansDetected: Bool = false
     public var pedestrianCount: Int = 0
@@ -135,6 +141,7 @@ public struct SensorFrame: Codable {
         dict["eyes_on_road"] = eyesOnRoad
         dict["attention_state"] = attentionState
         dict["lead_closing_fast"] = leadClosingFast
+        dict["forward_hazard_state"] = forwardHazardState
         dict["traffic_level"] = trafficLevel
         dict["pedestrians_detected"] = pedestriansDetected
         dict["pedestrian_count"] = pedestrianCount
