@@ -253,6 +253,12 @@ def create_app(
                     "risk_active": risk_active,
                     "received_at": time.time(),
                     "eyes_on_road": body.get("eyes_on_road", True),
+                    # Discrete reading behind eyes_on_road, e.g. "looking_down",
+                    # "face_not_detected", "uncertain" -- see
+                    # ios/RoadSense/Services/DriverAttentionState.swift.
+                    # Dashboard-only diagnostic, same as camera_status/debug_*
+                    # below; not validated against the strict SensorFrame schema.
+                    "attention_state": body.get("attention_state", "attentive"),
                     "eyes_closed_sec": body.get("eyes_closed_sec", 0.0),
                     "traffic_level": body.get("traffic_level", "empty"),
                     "pedestrians_detected": body.get("pedestrians_detected", False),
@@ -440,6 +446,7 @@ def create_app(
             ui_data = state
             result["camera_frame"] = ui_data.get("camera_frame")
             result["cv_eyes_on_road"] = ui_data.get("eyes_on_road", True)
+            result["cv_attention_state"] = ui_data.get("attention_state", "attentive")
             result["cv_eyes_closed_sec"] = ui_data.get("eyes_closed_sec", 0.0)
             result["cv_traffic"] = ui_data.get("traffic_level", "empty")
             result["cv_pedestrians_detected"] = ui_data.get("pedestrians_detected", False)

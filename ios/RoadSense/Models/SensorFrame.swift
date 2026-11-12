@@ -39,6 +39,11 @@ public struct SensorFrame: Codable {
     
     // 7-Factor Multimodal Variables
     public var eyesOnRoad: Bool = true
+    // Discrete reading behind eyesOnRoad above, e.g. "lookingDown",
+    // "faceNotDetected", "uncertain" -- see DriverAttentionState.swift.
+    // Kept as a plain String here (not the enum) since SensorFrame is a
+    // simple Codable/dictionary payload shape, matching every other field.
+    public var attentionState: String = "attentive"
     public var leadClosingFast: Bool = false
     public var trafficLevel: String = "empty"
     public var pedestriansDetected: Bool = false
@@ -128,6 +133,7 @@ public struct SensorFrame: Codable {
         
         // Output Vision Factors
         dict["eyes_on_road"] = eyesOnRoad
+        dict["attention_state"] = attentionState
         dict["lead_closing_fast"] = leadClosingFast
         dict["traffic_level"] = trafficLevel
         dict["pedestrians_detected"] = pedestriansDetected

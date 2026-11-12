@@ -97,9 +97,90 @@ Verification performed this session:
   working tree at session start (unrelated to this work) and was
   deliberately left out of this commit.
 
-## Phases 2-19
+## Phase 2 -- Front-camera driver attention detection: PARTIALLY COMPLETE
 
-Not started this session. Phase 2 (front-camera attention states) is the
-natural next step and does not require hardware to make progress on the
-rule/state-machine logic, though validating it against the documented
-nighttime failure modes does.
+Scope completed this session (logic/state-machine fixes that don't require
+hardware; see "what's not done" below for what does):
+
+1. **Added the missing "looking up" case.** The previous classifier only
+   checked `pitch < -0.4` (down); there was no upward threshold at all, so
+   no amount of tilting the head back (e.g. to check a vanity mirror) could
+   ever be flagged. New `classifyGaze` in
+   `ios/RoadSense/Services/DriverAttentionState.swift` checks both
+   directions (`pitchDown`/`pitchUp`, symmetric by default).
+2. **Fixed an asymmetric-hysteresis flicker bug.** The old code required
+   1.5s of *sustained* evidence to flag a distraction, but a single frame
+   reading "attentive" -- which pose-estimation noise can produce even
+   mid-turn -- instantly cleared it with zero debounce in the other
+   direction. This is almost certainly why "large head turns sometimes
+   cause face loss while app still appears to report eyes on the road":
+   one noisy frame during a real sustained turn could cancel the pending
+   distraction. `AttentionHysteresis` now requires sustained evidence in
+   BOTH directions (`enterDwell` = 1.5s to become distracted, `exitDwell` =
+   0.5s to return to attentive) -- same logic now governs face-loss and
+   head-turn/eyes-closed detection uniformly, replacing the old separate,
+   inconsistent `noFaceStartTime`/`distractedStartTime` timers.
+3. **Added a confidence gate -> `.uncertain`.** Per "do not turn unknown
+   into attentive": when Vision's face-detection confidence is below
+   `minConfidence` (0.4 default), the frame now reads `.uncertain` instead
+   of trusting whatever noisy pitch/yaw/EAR values a degraded reading
+   (darkness, glare, partial occlusion) happens to produce. This is the
+   mechanism for Phase 2.5 (nighttime): there is no way to validate real
+   nighttime accuracy without a physical device, but the system now has an
+   honest "I don't know" state for when detection degrades, rather than
+   defaulting to "safe."
+4. **Added 8 discrete `DriverAttentionState` cases** (`attentive`,
+   `lookingLeft/Right/Down/Up`, `eyesClosed`, `faceNotDetected`,
+   `uncertain`), published as `attentionState`, round-tripped through
+   `SensorFrame.attention_state` to the backend's live dashboard
+   (`cv_attention_state` in `/api/v1/predict/live`) and `ui_state`. The
+   existing `eyes_on_road` boolean is preserved and now derived from this
+   state (`DriverAttentionState.isEyesOnRoad`), not tracked separately --
+   satisfies "preserve compatibility with the existing eyes_on_road field."
+5. **Documented, not fixed, two real limitations (Phase 2.4):** this is
+   head pose, not eye gaze -- a driver who moves only their eyes (not their
+   head) toward a phone reads as attentive, and there is no pupil-tracking
+   implementation. There is also no visual phone-use detector -- looking
+   down is inferred from head pitch only, never a visually confirmed phone
+   in frame. Both are stated directly in `DriverAttentionState.swift`'s
+   doc comments rather than silently implied to work.
+
+What's explicitly NOT done, and why:
+
+- **The yaw-sign convention for lookingLeft/lookingRight is UNVERIFIED.**
+  `classifyGaze` picks positive yaw = looking right as a starting
+  convention; this cannot be confirmed without turning a real head in
+  front of the actual (non-mirrored) front camera and checking which way
+  `debugYaw` moves. Documented inline with the exact one-line fix if
+  backward.
+- **None of the dwell times or thresholds are empirically tuned.** `1.5s`
+  enter / `0.5s` exit / pitch `±0.4` / yaw `0.45` / EAR `0.18` / confidence
+  `0.4` are reasonable starting points, not validated against labeled
+  real-driving footage -- no such dataset exists in this environment. The
+  directive's own instruction ("tune based on labeled scenarios rather
+  than arbitrary guesses") cannot be followed without either real labeled
+  clips or a physical device test session.
+- **Visible phone-use detection, true eye-gaze estimation**: not
+  attempted. Documented as unimplemented rather than faked (Phase 2.4).
+- **Nighttime accuracy**: not measurable here. The confidence-gate
+  mechanism (#3 above) is the only thing this session could do toward
+  Phase 2.5 without a physical device and real low-light footage.
+- Still running at the Phase-1-documented 3fps capture rate, which bounds
+  how fast any of this can possibly react regardless of threshold tuning.
+
+Verification performed this session:
+
+- `xcodebuild` (Debug/iphonesimulator): **BUILD SUCCEEDED.**
+- `cd ios && swift test`: **32 passed** (17 from Phase 1, plus 8
+  `ClassifyGazeTests` and 7 `AttentionHysteresisTests` -- the latter
+  includes a test that directly reproduces and asserts against the
+  flicker bug described in #2 above).
+- `.venv/bin/python -m pytest -q`: **129 passed** (128 from before Phase 2,
+  plus one new test asserting `attention_state`/`cv_attention_state`
+  actually round-trips through `/ingest` -> `/api/v1/predict/live` instead
+  of being silently dropped).
+- No Android, `data/raw`, or dataset changes.
+
+## Phases 3-19
+
+Not started.
