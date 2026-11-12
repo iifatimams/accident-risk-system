@@ -14,18 +14,21 @@
 		4417BABDD29B010BEE1AC246 /* RoadSenseOnDeviceRiskEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D538130725141F482BE5790 /* RoadSenseOnDeviceRiskEngine.swift */; };
 		5D45900377FD5998DEA551FB /* SensorFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49EF4C4D47ACBC095254FB62 /* SensorFrame.swift */; };
 		7EADD7DC6C4FD1755DA7EB83 /* FusionModel.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 6D5DB04AA1F669FD237AABDE /* FusionModel.mlpackage */; };
+		8BEEC662796568A0B0E898E3 /* CollisionIncidentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA3C40C49D9D4D4C83A699C1 /* CollisionIncidentStore.swift */; };
+		B54BAA26EE1682B071B753F8 /* CollisionDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 560FCDD6F283C49A9440E7D8 /* CollisionDetector.swift */; };
 		BD96DB5904E9872C3896357B /* ObdBleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A467DBCF058E04A56FC266CE /* ObdBleClient.swift */; };
 		CF3807068F21948BC2DFFC47 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AA87CE96E00133D8BE1A265 /* ContentView.swift */; };
-		FCE9C7B1AF6DBCF08026F489 /* CollisionDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FC5DC23514366D813AE221B /* CollisionDetector.swift */; };
-		A2CB1C91898133B348123708 /* CollisionIncidentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30FD8AD5D6820B7789A5A15 /* CollisionIncidentStore.swift */; };
 		E15D1B1A2F7486EBCF471B7D /* ContextManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C99453FAE82A03FFD817DE49 /* ContextManager.swift */; };
 		E23A9176625E3889C8EB7FC7 /* RoadSenseApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BE8F30F4F9D5E9DE5DEA15F /* RoadSenseApp.swift */; };
+		FE0000000000000000000000 /* RoadSenseAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000000 /* RoadSenseAPI.swift */; };
+		FE0000000000000000000001 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000001 /* AuthManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		08CDA071C7C9B47AA4B3C0EC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		49EF4C4D47ACBC095254FB62 /* SensorFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorFrame.swift; sourceTree = "<group>"; };
 		4AA87CE96E00133D8BE1A265 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		560FCDD6F283C49A9440E7D8 /* CollisionDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollisionDetector.swift; sourceTree = "<group>"; };
 		6D538130725141F482BE5790 /* RoadSenseOnDeviceRiskEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoadSenseOnDeviceRiskEngine.swift; sourceTree = "<group>"; };
 		6D5DB04AA1F669FD237AABDE /* FusionModel.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = FusionModel.mlpackage; sourceTree = "<group>"; };
 		8AB20696F2C779ED07C24759 /* VZCrashModel.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = VZCrashModel.mlpackage; sourceTree = "<group>"; };
@@ -34,11 +37,12 @@
 		ABB4FC76367215D056FD96F7 /* RoadSense.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RoadSense.entitlements; sourceTree = "<group>"; };
 		B34C54271C1E05B4A1698093 /* RoadSense.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RoadSense.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C99453FAE82A03FFD817DE49 /* ContextManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextManager.swift; sourceTree = "<group>"; };
-		7FC5DC23514366D813AE221B /* CollisionDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollisionDetector.swift; sourceTree = "<group>"; };
-		C30FD8AD5D6820B7789A5A15 /* CollisionIncidentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollisionIncidentStore.swift; sourceTree = "<group>"; };
+		CA3C40C49D9D4D4C83A699C1 /* CollisionIncidentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollisionIncidentStore.swift; sourceTree = "<group>"; };
 		D2618A3749C6DF3CD570DA01 /* Uploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Uploader.swift; sourceTree = "<group>"; };
 		D6105DDE7FBFC679ABC34F27 /* BackgroundCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundCaptureService.swift; sourceTree = "<group>"; };
 		F3FD78276CAC74B9BF729075 /* WhoopClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhoopClient.swift; sourceTree = "<group>"; };
+		FD0000000000000000000000 /* RoadSenseAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoadSenseAPI.swift; sourceTree = "<group>"; };
+		FD0000000000000000000001 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -92,9 +96,11 @@
 		C018D8CE1835E84AA80BDBC1 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				FD0000000000000000000001 /* AuthManager.swift */,
+				FD0000000000000000000000 /* RoadSenseAPI.swift */,
 				D6105DDE7FBFC679ABC34F27 /* BackgroundCaptureService.swift */,
-				7FC5DC23514366D813AE221B /* CollisionDetector.swift */,
-				C30FD8AD5D6820B7789A5A15 /* CollisionIncidentStore.swift */,
+				560FCDD6F283C49A9440E7D8 /* CollisionDetector.swift */,
+				CA3C40C49D9D4D4C83A699C1 /* CollisionIncidentStore.swift */,
 				C99453FAE82A03FFD817DE49 /* ContextManager.swift */,
 				A467DBCF058E04A56FC266CE /* ObdBleClient.swift */,
 				6D538130725141F482BE5790 /* RoadSenseOnDeviceRiskEngine.swift */,
@@ -162,9 +168,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FE0000000000000000000001 /* AuthManager.swift in Sources */,
+				FE0000000000000000000000 /* RoadSenseAPI.swift in Sources */,
 				31A5EFE48F7CEB8742DA52AB /* BackgroundCaptureService.swift in Sources */,
-				FCE9C7B1AF6DBCF08026F489 /* CollisionDetector.swift in Sources */,
-				A2CB1C91898133B348123708 /* CollisionIncidentStore.swift in Sources */,
+				B54BAA26EE1682B071B753F8 /* CollisionDetector.swift in Sources */,
+				8BEEC662796568A0B0E898E3 /* CollisionIncidentStore.swift in Sources */,
 				CF3807068F21948BC2DFFC47 /* ContentView.swift in Sources */,
 				E15D1B1A2F7486EBCF471B7D /* ContextManager.swift in Sources */,
 				7EADD7DC6C4FD1755DA7EB83 /* FusionModel.mlpackage in Sources */,
@@ -307,7 +315,6 @@
 				CODE_SIGN_ENTITLEMENTS = RoadSense/RoadSense.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 233WPK8SN4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RoadSense/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

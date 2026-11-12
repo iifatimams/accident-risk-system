@@ -2,182 +2,6 @@ import SwiftUI
 import CoreLocation
 import CoreBluetooth
 
-// MARK: - Server Configuration
-public enum ServerConfig {
-    // PASTE YOUR ACTIVE NGROK HTTPS URL HERE (WITHOUT A TRAILING SLASH)
-    public static let activeBaseUrl = "https://evasion-stung-makeover.ngrok-free.dev"
-}
-
-// MARK: - Models
-public struct UserProfile: Codable {
-    public let id: Int
-    public let name: String
-    public let phone: String
-    public let role: String
-    public let kit: [KitDevice]?
-}
-
-public struct KitDevice: Codable {
-    public let kind: String
-    public let identifier: String
-    public let status: String
-}
-
-// MARK: - Auth Manager
-@MainActor
-public class AuthManager: ObservableObject {
-    public static let shared = AuthManager()
-    
-    @Published public var token: String? = UserDefaults.standard.string(forKey: "roadsense_auth_token")
-    @Published public var currentUser: UserProfile?
-    @Published public var assignedObdId: String?
-    @Published public var assignedWhoopId: String?
-    @Published public var isCodeSent = false
-    @Published public var errorMessage: String?
-    @Published public var isLoading = false
-    @Published public var devCodeHint: String?
-    
-    public var baseUrl: String {
-        return ServerConfig.activeBaseUrl.trimmingCharacters(in: CharacterSet(charactersIn: " /"))
-    }
-    
-    public var isAuthenticated: Bool {
-        return token != nil
-    }
-    
-    public init() {
-        if token != nil {
-            Task {
-                await fetchProfile()
-            }
-        }
-    }
-    
-    public func requestCode(phone: String) async {
-        isLoading = true
-        errorMessage = nil
-        devCodeHint = nil
-        
-        let cleanedPhone = phone.replacingOccurrences(of: " ", with: "")
-                                .replacingOccurrences(of: "-", with: "")
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        guard let url = URL(string: "\(baseUrl)/app/api/auth/request-code") else {
-            errorMessage = "Invalid server URL: \(baseUrl)"
-            isLoading = false
-            return
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
-        let body = ["phone": cleanedPhone]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-            
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                let detail = json["detail"] as? String ?? "Request failed with HTTP \((response as? HTTPURLResponse)?.statusCode ?? 502)"
-                errorMessage = detail
-                isLoading = false
-                return
-            }
-            
-            if let code = json["code"] as? String {
-                devCodeHint = "Code: \(code)"
-            }
-            isCodeSent = true
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        isLoading = false
-    }
-    
-    public func verifyCode(phone: String, code: String) async -> Bool {
-        isLoading = true
-        errorMessage = nil
-        
-        let cleanedPhone = phone.replacingOccurrences(of: " ", with: "")
-                                .replacingOccurrences(of: "-", with: "")
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        guard let url = URL(string: "\(baseUrl)/app/api/auth/verify") else {
-            errorMessage = "Invalid server URL: \(baseUrl)"
-            isLoading = false
-            return false
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
-        let body = [
-            "phone": cleanedPhone,
-            "code": code.trimmingCharacters(in: .whitespacesAndNewlines)
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-            
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                let detail = json["detail"] as? String ?? "Verification failed"
-                errorMessage = detail
-                isLoading = false
-                return false
-            }
-            
-            if let receivedToken = json["token"] as? String {
-                self.token = receivedToken
-                UserDefaults.standard.set(receivedToken, forKey: "roadsense_auth_token")
-                await fetchProfile()
-                isLoading = false
-                return true
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        
-        isLoading = false
-        return false
-    }
-    
-    public func fetchProfile() async {
-        guard let token = token,
-              let url = URL(string: "\(baseUrl)/app/api/me") else { return }
-        
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
-        
-        do {
-            let (data, _) = try await URLSession.shared.data(for: request)
-            let profile = try JSONDecoder().decode(UserProfile.self, from: data)
-            self.currentUser = profile
-            
-            if let kit = profile.kit {
-                self.assignedObdId = kit.first(where: { $0.kind == "adapter" })?.identifier
-                self.assignedWhoopId = kit.first(where: { $0.kind == "wearable" })?.identifier
-            }
-        } catch {
-            print("Failed to fetch driver profile: \(error)")
-        }
-    }
-    
-    public func signOut() {
-        token = nil
-        currentUser = nil
-        assignedObdId = nil
-        assignedWhoopId = nil
-        isCodeSent = false
-        UserDefaults.standard.removeObject(forKey: "roadsense_auth_token")
-    }
-}
-
 // MARK: - Permission Trigger Manager
 public class PermissionTriggerManager: NSObject, ObservableObject, CLLocationManagerDelegate, CBCentralManagerDelegate {
     private var locationManager: CLLocationManager?
@@ -236,12 +60,21 @@ public struct LoginView: View {
     @ObservedObject var auth = AuthManager.shared
     @AppStorage("saved_driver_phone") private var phoneNumber = ""
     @State private var verificationCode = ""
+    @State private var showingSettings = false
     @FocusState private var isFieldFocused: Bool
     
     public var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                Spacer(minLength: 40)
+                Button("Server Settings") { showingSettings = true }
+                    .disabled(auth.isLoading)
+                Text(auth.baseUrl.isEmpty ? "Choose a backend in Settings" : auth.baseUrl)
+                    .font(.caption).foregroundColor(.secondary)
+                if auth.token != nil {
+                    Button("Retry Sign-In Connection") { Task { await auth.fetchProfile() } }
+                        .disabled(auth.isLoading)
+                }
+                Spacer(minLength: 16)
                 
                 VStack(spacing: 8) {
                     Image(systemName: "car.side.fill")
@@ -254,7 +87,7 @@ public struct LoginView: View {
                         .font(.largeTitle)
                         .fontWeight(.bold)
                     
-                    Text("Sign in with your enrolled mobile number")
+                    Text(auth.demoMode ? "Restricted university demo account" : "Sign in using an SMS verification code")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -267,7 +100,7 @@ public struct LoginView: View {
                             .fontWeight(.semibold)
                             .foregroundColor(.secondary)
                         
-                        TextField("+971508151511", text: $phoneNumber)
+                        TextField("Mobile number with country code", text: $phoneNumber)
                             .keyboardType(.phonePad)
                             .focused($isFieldFocused)
                             .padding()
@@ -342,7 +175,7 @@ public struct LoginView: View {
                                     ProgressView()
                                         .tint(.white)
                                 } else {
-                                    Text("Confirm & Start")
+                                    Text("Sign In")
                                         .fontWeight(.bold)
                                 }
                             }
@@ -372,6 +205,7 @@ public struct LoginView: View {
             }
             .padding(28)
         }
+        .sheet(isPresented: $showingSettings) { ServerSettingsView() }
         .onTapGesture {
             isFieldFocused = false
         }
@@ -393,6 +227,7 @@ public struct ContentView: View {
     @EnvironmentObject var captureService: BackgroundCaptureService
     @ObservedObject var auth = AuthManager.shared
     @StateObject private var permissions = PermissionTriggerManager()
+    @State private var showingSettings = false
     
     public var body: some View {
         if !auth.isAuthenticated {
@@ -411,6 +246,8 @@ public struct ContentView: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
+                        Button("Settings") { showingSettings = true }
+                            .disabled(captureService.isRunning || auth.isLoading)
                         Button("Sign Out") {
                             if captureService.isRunning {
                                 captureService.stop()
@@ -522,6 +359,10 @@ public struct ContentView: View {
                     .cornerRadius(12)
                     .padding(.horizontal)
                     
+                    if let error = auth.errorMessage {
+                        Text(error).font(.callout).foregroundColor(.red).padding(.horizontal)
+                    }
+                    if auth.isLoading { ProgressView("Contacting RoadSense…") }
                     // Action Button
                     Button(action: {
                         if captureService.isRunning {
@@ -540,8 +381,10 @@ public struct ContentView: View {
                     }
                     .padding(.horizontal)
                     .padding(.bottom, 30)
+                    .disabled(auth.isLoading)
                 }
             }
+            .sheet(isPresented: $showingSettings) { ServerSettingsView() }
             // Offline-capable: Confirm/Dismiss write to CollisionIncidentStore
             // directly and only best-effort attempt the server afterward --
             // this overlay works with zero connectivity. Non-dismissable by
@@ -562,46 +405,20 @@ public struct ContentView: View {
     }
 
     private func startDriverSession() {
-        guard let token = auth.token,
-              let url = URL(string: "\(auth.baseUrl)/app/api/driver/session/start") else { return }
-        
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: [:])
-        
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let streamId = json["stream_id"] as? String else {
-                print("Failed to start session on backend")
-                return
-            }
-            
-            DispatchQueue.main.async {
-                captureService.obdClient.targetDeviceIdentifier = auth.assignedObdId
-                captureService.whoopClient.targetDeviceIdentifier = auth.assignedWhoopId
-                // Point capture service directly to active base URL
-                captureService.serverUrl = auth.baseUrl
-                captureService.start(withStreamId: streamId, userId: auth.currentUser?.id)
-            }
-        }.resume()
+        Task {
+            guard let streamId = await auth.startSession() else { return }
+            captureService.obdClient.targetDeviceIdentifier = auth.assignedObdId
+            captureService.whoopClient.targetDeviceIdentifier = auth.assignedWhoopId
+            captureService.serverUrl = auth.baseUrl
+            captureService.start(withStreamId: streamId, userId: auth.currentUser?.id)
+        }
     }
-    
+
     private func stopDriverSession() {
         captureService.stop()
-        
-        guard let token = auth.token,
-              let url = URL(string: "\(auth.baseUrl)/app/api/driver/session/stop") else { return }
-        
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
-        URLSession.shared.dataTask(with: req).resume()
+        Task { await auth.stopSession() }
     }
+
 }
 
 // MARK: - Collision Confirmation
@@ -654,6 +471,57 @@ public struct CollisionAlertOverlay: View {
             .cornerRadius(20)
             .padding(.horizontal, 30)
             .shadow(radius: 20)
+        }
+    }
+}
+
+/// Available before sign-in so an expired tunnel can always be replaced.
+public struct ServerSettingsView: View {
+    @ObservedObject private var auth = AuthManager.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var endpoint = ""
+    @State private var demoMode = false
+    @State private var pairingKey = ""
+
+    public var body: some View {
+        NavigationStack {
+            Form {
+                Section("Backend address") {
+                    TextField("https://your-tunnel.ngrok-free.app", text: $endpoint)
+                        .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Text("For different Wi-Fi or mobile data, use your current HTTPS tunnel. localhost refers to the iPhone, not your Mac. Changing servers signs you out.")
+                        .font(.caption)
+                }
+                Section("University demo") {
+                    Toggle("Restricted demo login", isOn: $demoMode)
+                    if demoMode {
+                        SecureField("Private pairing key from backend operator", text: $pairingKey)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Text("Use test accounts on the separate demo server. The pairing key authorizes code display and is kept only until this app closes. Never share it publicly.")
+                            .font(.caption)
+                    }
+                }
+                Section {
+                    Button("Save & Test Connection") {
+                        if auth.saveEndpoint(endpoint) {
+                            auth.demoMode = demoMode
+                            auth.demoKey = demoMode ? pairingKey.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+                            Task { await auth.testConnection() }
+                        }
+                    }
+                    .disabled(auth.isLoading)
+                    if auth.isLoading { ProgressView() }
+                    if let message = auth.connectionMessage { Text(message).foregroundColor(.green) }
+                    if let error = auth.errorMessage { Text(error).foregroundColor(.red) }
+                }
+            }
+            .navigationTitle("Server Settings")
+            .toolbar { Button("Done") { dismiss() }.disabled(auth.isLoading) }
+            .onAppear {
+                endpoint = auth.baseUrl
+                demoMode = auth.demoMode
+                pairingKey = auth.demoKey
+            }
         }
     }
 }

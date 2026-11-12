@@ -1,5 +1,6 @@
 """Phone-number authentication with single-use codes and bearer tokens.
-Supports real SMS delivery via Twilio environment variables, with fallback to dev mode.
+Normal operation requires SMS delivery. Demo codes require a private pairing key
+and an explicit test-account allowlist; delivery failure never enables demo mode.
 """
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ def _send_real_sms(phone: str, code: str) -> bool:
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             return resp.status in (200, 201)
     except Exception as exc:
-        LOGGER.error("Failed to send real SMS via Twilio to %s: %s", phone, exc)
+        LOGGER.error("SMS delivery failed (%s)", type(exc).__name__)
         return False
 
 
@@ -72,36 +73,49 @@ class AuthError(Exception):
 
 
 class AuthService:
-    def __init__(self, database: Database, dev_mock_sms_delivery: bool = False) -> None:
-        """dev_mock_sms_delivery must stay False in any deployment with real
-        users: True makes request_code hand a working login code straight
-        back to whoever asks for an already-known phone number, with no
-        proof they own that number. It exists only for a local, offline
-        demonstration with no real Twilio delivery -- opt in explicitly at
-        the call site (see create_app's own parameter), never ambiently."""
+    def __init__(
+        self, database: Database, dev_mock_sms_delivery: bool = False,
+        demo_access_key: str | None = None, demo_phone_numbers: list[str] | None = None,
+    ) -> None:
+        """Demo mode requires both a strong pairing key and explicit test identities.
+
+        Use a separate synthetic database. The key authenticates the test device;
+        a phone number or a forwarded/private IP address is never authorization.
+        """
         self.db = database
         self.dev_mock_sms_delivery = dev_mock_sms_delivery
+        self._demo_key = demo_access_key or ""
+        self._demo_phones = {normalise_phone(p) for p in (demo_phone_numbers or [])}
+        if dev_mock_sms_delivery and (len(self._demo_key) < 32 or not self._demo_phones):
+            raise ValueError("Demo mode requires a pairing key of at least 32 characters and test phone numbers")
 
-    def request_code(self, raw_phone: str) -> dict[str, Any]:
-        """Create a single-use login code.
-        Auto-enrols unknown pilot numbers as 'driver' to prevent silent code drop.
-        """
+    def request_code(self, raw_phone: str, *, demo_key: str | None = None) -> dict[str, Any]:
+        """Issue a code only after authorized demo access or successful SMS delivery."""
         phone = normalise_phone(raw_phone)
-        user = self.db.get_user_by_phone(phone)
-        pre_existing = user is not None
+        if self.dev_mock_sms_delivery:
+            if not demo_key or not hmac.compare_digest(demo_key.encode(), self._demo_key.encode()):
+                raise AuthError("Demo access requires the private pairing key from the backend operator", 403)
+            if phone not in self._demo_phones:
+                raise AuthError("This number is not an allowed demo account", 403)
+        elif demo_key:
+            raise AuthError("This server is not in demo mode. Turn off demo mode in Settings", 400)
 
-        # Auto-create driver account if not existing yet (pilot testing usability)
-        if user is None:
-            try:
-                user = self.db.create_user(phone=phone, name=f"Driver {phone[-4:]}", role="driver")
-            except Exception:
-                # If race condition or user created concurrently, query again
-                user = self.db.get_user_by_phone(phone)
-        
-        if user is not None and not user.get("active", 1):
-            raise AuthError("This account has been deactivated. Please contact an admin.", status=403)
+        user = self.db.get_user_by_phone(phone)
+        if user is not None and not user["active"]:
+            raise AuthError("This account has been deactivated. Please contact an admin", 403)
 
         code = f"{secrets.randbelow(1_000_000):06d}"
+        if not self.dev_mock_sms_delivery and not _send_real_sms(phone, code):
+            raise AuthError("Verification SMS could not be delivered. Ask the operator to configure SMS or use the restricted demo server", 503)
+
+        # New accounts follow the same delivery policy as existing accounts.
+        # Do not create accounts or invalidate codes for rejected demo requests.
+        if user is None:
+            try:
+                self.db.create_user(phone=phone, name=f"Driver {phone[-4:]}", role="driver")
+            except ValueError:
+                if self.db.get_user_by_phone(phone) is None:
+                    raise
         with self.db.connect() as connection:
             connection.execute(
                 "INSERT INTO auth_codes(phone, code_hash, expires_at, attempts) "
@@ -109,34 +123,13 @@ class AuthService:
                 "code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0",
                 (phone, _digest(code), time.time() + CODE_TTL_SECONDS),
             )
-
-        sms_dispatched = _send_real_sms(phone, code)
-        print(f"\n=======================================================")
-        print(f"[AUTH] >>> SMS VERIFICATION CODE FOR {phone}: {code} <<<")
-        print(f"[AUTH] Twilio Sent: {sms_dispatched}")
-        print(f"=======================================================\n")
-
         result: dict[str, Any] = {
             "sent": True,
-            "delivery": "sms" if sms_dispatched else "development",
+            "delivery": "demo" if self.dev_mock_sms_delivery else "sms",
             "expires_in": int(CODE_TTL_SECONDS),
         }
-
-        # The code is echoed back in the API response ONLY when
-        # dev_mock_sms_delivery was explicitly turned on AND the identity was
-        # already known. Real SMS merely failing to send is NOT a reason to
-        # leak the code to the caller -- in normal operation (the default),
-        # nothing is ever returned here, for a new number or an existing one;
-        # the legitimate owner's phone either gets the real SMS or, in a dev
-        # deployment, someone with server-log access reads the console print
-        # above. An unauthenticated caller who merely knows a phone number
-        # must never be able to fetch that account's login code this way.
-        if pre_existing and self.dev_mock_sms_delivery:
+        if self.dev_mock_sms_delivery:
             result["code"] = code
-            result["warning"] = (
-                "DEV MOCK SMS DELIVERY IS ON. Never enable this with real users."
-            )
-
         return result
 
     def verify_code(self, raw_phone: str, code: str) -> dict[str, Any]:

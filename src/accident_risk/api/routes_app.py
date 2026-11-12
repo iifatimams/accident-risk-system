@@ -274,17 +274,27 @@ def create_router(
         for timed_out in database.timeout_unconfirmed_incidents(UNCONFIRMED_INCIDENT_TIMEOUT_SECONDS):
             notify_family_of_incident(timed_out)
 
+    @router.get("/connection")
+    def connection() -> dict[str, Any]:
+        """Non-sensitive identity probe used by the physical phone's Settings screen."""
+        return {"service": "roadsense", "api_version": 1, "demo_mode": auth.dev_mock_sms_delivery}
+
     @router.post("/auth/request-code")
-    def request_code(payload: CodeRequest) -> dict[str, Any]:
+    def request_code(
+        payload: CodeRequest, response: Response,
+        x_roadsense_demo_key: Annotated[str | None, Header()] = None,
+    ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
         try:
-            return auth.request_code(payload.phone)
+            return auth.request_code(payload.phone, demo_key=x_roadsense_demo_key)
         except AuthError as exc:
             raise HTTPException(exc.status, exc.message) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @router.post("/auth/verify")
-    def verify(payload: VerifyRequest) -> dict[str, Any]:
+    def verify(payload: VerifyRequest, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
         try:
             return auth.verify_code(payload.phone, payload.code)
         except ValueError as exc:

@@ -83,14 +83,14 @@ def create_app(
     engine: InferenceEngine | None = None,
     database_path: Path | str | None = None,
     dev_mock_sms_delivery: bool | None = None,
+    demo_access_key: str | None = None,
+    demo_phone_numbers: list[str] | None = None,
 ) -> FastAPI:
-    """dev_mock_sms_delivery: explicit, call-site-visible override for
-    AuthService's dev-only mock SMS delivery (see auth.py). None (the
-    default) defers to ACCIDENT_RISK_DEV_MOCK_SMS_DELIVERY, itself False
-    unless set -- so a plain create_app() call is secure by default; passing
-    True must be a deliberate choice by the caller (e.g. an automated test),
-    never an ambient environment setting someone forgot was on."""
+    """Build the API; optional demo delivery requires a pairing key and allowlist."""
     env = EnvironmentSettings()
+    demo_enabled = env.dev_mock_sms_delivery if dev_mock_sms_delivery is None else dev_mock_sms_delivery
+    if demo_enabled and database_path is None:
+        raise ValueError("Demo mode requires an explicit isolated database; use scripts/serve_demo.py")
     if engine is None:
         config = load_config(env.config) if env.config.exists() else {}
         configure_logging(config.get("logging", {}).get("level", "INFO"))
@@ -125,9 +125,14 @@ def create_app(
         dev_mock_sms_delivery=(
             env.dev_mock_sms_delivery if dev_mock_sms_delivery is None else dev_mock_sms_delivery
         ),
+        demo_access_key=demo_access_key if demo_access_key is not None else (
+            env.demo_access_key.get_secret_value() if env.demo_access_key else None
+        ),
+        demo_phone_numbers=demo_phone_numbers if demo_phone_numbers is not None else env.demo_phone_numbers,
     )
     recorder = SessionRecorder(database)
-    bootstrap_administrator(database, env)
+    if not demo_enabled:
+        bootstrap_administrator(database, env)
     notification_sender = MockNotificationSender()
 
     application.state.db = database
@@ -147,7 +152,8 @@ def create_app(
     @application.get("/app/{path:path}", include_in_schema=False)
     def application_shell(path: str = "") -> FileResponse:
         # FastAPI requires the `path` argument for the catch-all route.
-        _ = path
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(404, "Unknown RoadSense API route")
         return FileResponse(
             static_dir / "app" / "index.html", headers={"Cache-Control": "no-store"}
         )

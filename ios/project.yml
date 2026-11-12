@@ -11,6 +11,23 @@ targets:
       - path: RoadSense
     info:
       path: RoadSense/Info.plist
+      properties:
+        NSBluetoothAlwaysUsageDescription: RoadSense connects to the vehicle OBD and WHOOP
+          strap via Bluetooth
+        NSLocationAlwaysAndWhenInUseUsageDescription: RoadSense collects driving telemetry
+          in the background
+        NSLocationWhenInUseUsageDescription: RoadSense requires GPS during active drives
+        NSMotionUsageDescription: RoadSense monitors vehicle dynamics using phone motion sensors
+        NSCameraUsageDescription: RoadSense uses the front and rear cameras to detect driver
+          distraction and road traffic
+        UIBackgroundModes:
+        - location
+        - bluetooth-central
+        - processing
+        NSLocalNetworkUsageDescription: RoadSense connects to your selected local development
+          backend.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     entitlements:
       path: RoadSense/RoadSense.entitlements
     settings:
