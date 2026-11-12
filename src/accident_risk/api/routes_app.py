@@ -209,6 +209,7 @@ def create_router(
             message = build_message(
                 driver["name"], alert["status"], contact["share_location"],
                 alert.get("latitude"), alert.get("longitude"),
+                confirmed_by_driver=alert.get("acknowledged_by") == alert["user_id"],
             )
             status = notification_sender.send(
                 contact_phone=contact["phone"], contact_name=contact["name"], message=message
@@ -513,12 +514,23 @@ def create_router(
 
     @router.post("/alerts/{alert_id}/{action}")
     def act_on_alert(alert_id: int, action: str, principal: Principal = any_user) -> dict[str, Any]:
-        # confirm/cancel: unchanged from before (high_risk alerts, manual
-        # collision reports). dismiss/resolve are new, lifecycle-enforced
-        # actions for an automatically DETECTED incident (see
-        # recorder.check_collision / INCIDENT_LIFECYCLE) -- "dismiss" is the
-        # driver saying a suspected impact wasn't real; "resolve" is an
-        # explicit administrative close-out after confirm/dismiss/timeout.
+        # confirm/cancel: legacy vocabulary for high_risk alerts and manual
+        # collision reports (status "pending") -- never lifecycle-enforced
+        # for those, unchanged from before. dismiss/resolve are the richer,
+        # always-enforced vocabulary for an automatically DETECTED incident
+        # (see recorder.check_collision / INCIDENT_LIFECYCLE).
+        #
+        # The two vocabularies share one table AND can share status
+        # STRINGS (an automatic incident also reaches "confirmed"), so
+        # status alone cannot distinguish them -- checking the alert's own
+        # detail.source ("automatic_detector" is set only by
+        # recorder._check_collision, never by a manual report or a plain
+        # high_risk alert) is unambiguous. Without this, confirm/cancel
+        # were NEVER lifecycle-enforced at all, so a stray "confirm" could
+        # reopen an already-resolved/dismissed/timed-out automatic
+        # incident (checkpoint resume task #4) -- while a legacy alert
+        # that happens to reach "confirmed" must still accept a later
+        # "cancel" exactly as before.
         status_by_action = {
             "confirm": "confirmed", "cancel": "cancelled",
             "dismiss": "dismissed", "resolve": "resolved",
@@ -531,10 +543,11 @@ def create_router(
         if not role_allows(principal.role, "account_manager") and (existing["user_id"] != principal.user_id):
             raise HTTPException(403, "You can only act on your own alerts")
 
+        is_automatic_incident = existing.get("detail", {}).get("source") == "automatic_detector"
         try:
             updated = database.set_alert_status(
                 alert_id, status_by_action[action], principal.user_id,
-                enforce_lifecycle=action in {"dismiss", "resolve"},
+                enforce_lifecycle=action in {"dismiss", "resolve"} or is_automatic_incident,
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

@@ -655,6 +655,72 @@ def test_collision_incident_lifecycle_dismiss_resolve_and_invalid_transitions(
     assert again.status_code == 409
 
 
+def test_confirm_and_cancel_are_also_lifecycle_enforced_once_an_incident_is_in_the_rich_vocabulary(
+    client, people
+):
+    """Checkpoint resume task #4: confirm/cancel were NEVER lifecycle-
+    enforced (only dismiss/resolve were), so a stray "confirm" could reopen
+    an already-dismissed/resolved automatic incident. Once an incident has
+    entered the rich lifecycle (anything past awaiting_confirmation),
+    confirm/cancel must be enforced exactly like dismiss/resolve."""
+    headers = sign_in(client, "+971501110001")
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+    })
+    incident = client.get("/app/api/alerts", headers=headers).json()[0]
+    assert incident["status"] == "awaiting_confirmation"
+
+    # "cancel" is not a reachable state from awaiting_confirmation at all
+    # (only confirmed/dismissed/unconfirmed_timeout are) -- must be rejected.
+    bad_cancel = client.post(f"/app/api/alerts/{incident['id']}/cancel", headers=headers)
+    assert bad_cancel.status_code == 409
+
+    dismissed = client.post(f"/app/api/alerts/{incident['id']}/dismiss", headers=headers)
+    assert dismissed.status_code == 200 and dismissed.json()["status"] == "dismissed"
+
+    # A dismissed incident must not be reopened by "confirm" -- this is
+    # the exact gap checkpoint task #4 describes.
+    stray_confirm = client.post(f"/app/api/alerts/{incident['id']}/confirm", headers=headers)
+    assert stray_confirm.status_code == 409
+    assert client.get("/app/api/alerts", headers=headers).json()[0]["status"] == "dismissed"
+
+    resolved = client.post(f"/app/api/alerts/{incident['id']}/resolve", headers=headers)
+    assert resolved.status_code == 200 and resolved.json()["status"] == "resolved"
+
+    # A resolved incident is terminal for EVERY action, not just resolve
+    # again -- confirm/cancel/dismiss must all be rejected too.
+    for action in ("confirm", "cancel", "dismiss", "resolve"):
+        rejected = client.post(f"/app/api/alerts/{incident['id']}/{action}", headers=headers)
+        assert rejected.status_code == 409, f"{action} on a resolved incident must be rejected"
+
+
+def test_legacy_pending_alert_confirm_and_cancel_remain_unrestricted(client, app, people, monkeypatch):
+    """The legacy high_risk vocabulary (status "pending") was never part of
+    INCIDENT_LIFECYCLE and must stay exactly as permissive as before this
+    session's fix -- only the richer automatic-incident vocabulary gained
+    enforcement on confirm/cancel."""
+    clock = [5_000_000.0]
+    monkeypatch.setattr("time.time", lambda: clock[0])
+    headers = sign_in(client, "+971501110001")
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    app.state.recorder.register(started["stream_id"], started["id"])
+    alert = app.state.db.create_alert(
+        user_id=app.state.db.get_user_by_phone("+971501110001")["id"],
+        kind="high_risk", session_id=started["id"], risk_index=0.9,
+    )
+    assert alert["status"] == "pending"
+
+    confirmed = client.post(f"/app/api/alerts/{alert['id']}/confirm", headers=headers)
+    assert confirmed.status_code == 200 and confirmed.json()["status"] == "confirmed"
+    # Legacy behavior: even a second "confirm" (or "cancel") on an already-
+    # confirmed legacy alert is still allowed -- this was never enforced
+    # and this fix must not start enforcing it now.
+    cancelled = client.post(f"/app/api/alerts/{alert['id']}/cancel", headers=headers)
+    assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
+
+
 def test_unconfirmed_collision_incident_times_out(client, app, people, monkeypatch):
     clock = [3_000_000.0]
     monkeypatch.setattr("time.time", lambda: clock[0])
@@ -799,6 +865,42 @@ def test_confirmed_collision_notifies_family_respecting_location_consent(
         f"/app/api/alerts/{incident['id']}/family-notifications", headers=headers
     ).json()
     assert sum(1 for n in refreshed if n["acknowledged_at"] is not None) == 1
+
+
+def test_manager_confirmed_incident_notifies_family_with_different_wording(
+    client, app, people, monkeypatch
+):
+    """Checkpoint resume task #4: an account manager can confirm another
+    driver's alert (role_allows(..., "account_manager")) -- the family
+    message must say so, never attribute the manager's action to the
+    driver as if the driver confirmed it themselves."""
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    driver_headers = sign_in(client, "+971501110001")
+    manager_headers = sign_in(client, "+971501110002")
+
+    contact = client.post(
+        "/app/api/driver/family-contacts", headers=driver_headers,
+        json={"name": "Watchful Aunt", "phone": "+971500000666"},
+    ).json()
+    client.post("/app/api/family/accept", json={"token": contact["invite_token"]})
+
+    started = client.post("/app/api/driver/session/start", headers=driver_headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+    })
+    incident = client.get("/app/api/alerts", headers=driver_headers).json()[0]
+
+    confirmed = client.post(f"/app/api/alerts/{incident['id']}/confirm", headers=manager_headers)
+    assert confirmed.status_code == 200 and confirmed.json()["status"] == "confirmed"
+
+    sent = app.state.notification_sender.sent
+    assert len(sent) == 1
+    assert "account manager, not the driver" in sent[0]["message"]
+    assert "Driver One confirmed they were in a collision" not in sent[0]["message"]
 
 
 def test_accepting_an_invite_does_not_itself_grant_location_access(client, people):
