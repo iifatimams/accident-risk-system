@@ -281,6 +281,12 @@ def create_app(
                     "debug_yaw": body.get("debug_yaw", 0.0),
                     "debug_roll": body.get("debug_roll", 0.0),
                     "debug_ear": body.get("debug_ear", 0.0),
+                    # Phase 9.1 explainable breakdown (ml_fusion_base, each
+                    # named heuristic adjustment) -- see
+                    # ios/RoadSense/Services/RiskFusionHeuristics.swift.
+                    # Dashboard-only, like everything else in this block;
+                    # absent entirely when risk is inactive.
+                    "risk_breakdown": body.get("risk_breakdown"),
                 })
             elif source_tag in LEGACY_RUNNER_SOURCES:
                 state.update({
@@ -471,6 +477,7 @@ def create_app(
             result["cv_debug_yaw"] = ui_data.get("debug_yaw", 0.0)
             result["cv_debug_roll"] = ui_data.get("debug_roll", 0.0)
             result["cv_debug_ear"] = ui_data.get("debug_ear", 0.0)
+            result["risk_breakdown"] = ui_data.get("risk_breakdown")
 
             return result
 

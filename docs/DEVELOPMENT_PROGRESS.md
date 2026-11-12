@@ -657,6 +657,65 @@ Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **60
 passed** (7 new). `pytest`: **173 passed** (1 new). No Android, `data/raw`,
 or real-database changes.
 
-## Phases 8-19
+## Phase 9 -- Explainable risk fusion: IMPLEMENTED (9.1 only)
+
+### 9.1 Explainable risk breakdown
+
+`RoadSenseOnDeviceRiskEngine.predictRisk` was a single opaque function
+returning one `Double`, with the raw CoreML model output and ~6 different
+hand-authored heuristic adjustments (jerk boost, HR-velocity boost,
+traffic/pedestrian context, an eyes-closed ramp, an eyes-off-road
+penalty, a false-positive suppressor, and a hard override) all summed
+together inline, in one function, with no way to ask "why is the score
+80 right now?" This file ALSO could not be unit tested at all in this
+environment -- it imports CoreML and generated model classes that only
+exist inside an Xcode build.
+
+Extracted the heuristic half (steps 5-10 of the original function) into
+`ios/RoadSense/Services/RiskFusionHeuristics.swift`: a pure function
+(`applyRiskHeuristics`) taking the raw ML fusion value as a plain
+`Double` input and returning a `RiskBreakdown` struct with every
+component named separately (`mlFusionBase`, `jerkBoost`,
+`hrVelocityBoost`, `trafficContext`, `pedestrianContext`,
+`eyesClosedPenalty`, `attentionPenalty`, `leadClosingHardBoost`, plus
+`falsePositiveSuppressionApplied`/`hardOverrideApplied` flags and the
+final clamped `total`) -- this is a line-for-line port, same constants,
+same order of operations, not a re-tuning. `RoadSenseOnDeviceRiskEngine`
+was refactored to compute the ML components exactly once (new private
+`mlComponents`/`breakdown` helpers, no duplicated CoreML inference) and
+delegate to this function; `predictRisk`'s existing signature and
+behavior are completely unchanged for its one existing caller. A new
+`predictRiskBreakdown` method returns the full struct.
+
+Wired into `BackgroundCaptureService.sendCurrentSnapshot`: the payload
+now includes a `risk_breakdown` object (every named component) alongside
+the existing `risk_score`, dashboard-only like `camera_status`/`debug_*`
+-- never part of the validated `SensorFrame` schema, and the index itself
+remains exactly as experimental/uncalibrated as before regardless of how
+it's broken down. Rounds-trips to the backend (`risk_breakdown` in
+`/api/v1/predict/live`).
+
+13 new Swift tests (`RiskFusionHeuristicsTests`) -- the first tests this
+heuristic logic has ever had, now that it's separated from the untestable
+CoreML half. Pins down exactly what the original code's own comments
+claimed: jerk/HR-velocity boosts only above their thresholds and capped,
+the continuous (not step-function) eyes-closed ramp, the attention
+penalty's traffic/pedestrian escalation, the false-positive suppressor
+correctly capping roundabout/swerve cases, and -- critically -- that the
+eyes-closed-3-seconds hard override still wins even inside a roundabout
+(a real safety condition must never be suppressed by the false-positive
+guard meant for ordinary turning noise). Plus 1 new Python round-trip
+test.
+
+What's NOT done (9.2 false-alarm investigation, 9.3 sensor-fusion
+integrity audit): not attempted this session -- 9.1 alone was a
+substantial, self-contained unit of work, and false-alarm tuning
+specifically needs real driving data this environment doesn't have.
+
+Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **73
+passed** (13 new). `pytest`: **174 passed** (1 new). No Android,
+`data/raw`, or real-database changes.
+
+## Phases 10-19
 
 Not started.

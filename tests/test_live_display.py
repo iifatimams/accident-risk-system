@@ -145,3 +145,28 @@ def test_pedestrian_hazard_state_round_trips_through_live_dashboard(tmp_path):
     data = client.get("/api/v1/predict/live?stream_id=driver-3").json()
     assert data["cv_pedestrians_detected"] is True
     assert data["cv_pedestrian_hazard_state"] == "entering_conflict_zone"
+
+
+def test_risk_breakdown_round_trips_through_live_dashboard(tmp_path):
+    """risk_breakdown is dashboard-only explainability (see
+    RiskFusionHeuristics.swift / Phase 9.1): absent/None when never sent,
+    and must not be silently dropped when it is."""
+    client = TestClient(
+        create_app(InferenceEngine(), database_path=tmp_path / "test_risk_breakdown.sqlite3")
+    )
+    default_only = client.get("/api/v1/predict/live?stream_id=none-yet").json()
+    assert default_only["risk_breakdown"] is None
+
+    frame = dict(
+        timestamp=time.time(),
+        source="ios",
+        stream_id="driver-4",
+        risk_active=True,
+        risk_score=42,
+        risk_breakdown={"ml_fusion_base": 20.0, "eyes_closed_penalty": 22.0, "hard_override_applied": False},
+    )
+    assert client.post("/ingest", json=frame).status_code == 200
+    data = client.get("/api/v1/predict/live?stream_id=driver-4").json()
+    assert data["risk_breakdown"]["ml_fusion_base"] == 20.0
+    assert data["risk_breakdown"]["eyes_closed_penalty"] == 22.0
+    assert data["risk_breakdown"]["hard_override_applied"] is False
