@@ -1,4 +1,17 @@
-"""In-process offline API contract tests with synthetic measurements."""
+"""In-process offline API contract tests with synthetic measurements.
+
+NOTE: this file previously asserted a pre-refactor contract (legacy
+top-level `/session/start`, `/session/stop`, `/prediction/latest`,
+`/ingest/batch`, `/reset` routes and a single-page tabbed dashboard with
+inline tire-pressure gauges). None of those routes or dashboard strings
+exist anymore -- the app was rebuilt as a role-based, sign-in-gated SPA
+(see `routes_app.py`'s `/app/api/...` endpoints and
+`static/app/{index.html,app.js,app.css}`). This rewrite asserts the
+contract that actually exists today, confirmed by exercising the real
+running app rather than guessing.
+"""
+
+import time
 
 from fastapi.testclient import TestClient
 
@@ -11,40 +24,28 @@ def test_api(models):
         dashboard = client.get("/")
         assert dashboard.status_code == 200
         assert "RoadSense" in dashboard.text
-        demo_script = client.get("/static/app.js")
-        assert demo_script.status_code == 200
-        assert client.get("/static/dashboard.css").status_code == 200
-        assert "live-tab" in dashboard.text and "demo-tab" in dashboard.text
-        assert "actual-map" in dashboard.text
-        assert "OpenStreetMap" in dashboard.text
-        assert "Tire pressure" in dashboard.text
-        assert "Motion & gyro" in dashboard.text
-        assert "tire_pressure_fl" in demo_script.text
+
+        assert client.get("/static/app/app.js").status_code == 200
+        assert client.get("/static/app/app.css").status_code == 200
         assert client.get("/docs").status_code == 200
         assert client.get("/health").json()["status"] == "ok"
-        assert client.get("/prediction/latest").json() is None
+
         payload = {
-            "timestamp": 100,
+            "timestamp": time.time(),
             "source": "synthetic",
             "stream_id": "trip",
             "vehicle_speed": 10,
         }
-        assert client.post("/ingest", json=payload).json() is None
-        p = client.post("/ingest", json=payload | {"timestamp": 101}).json()
-        assert p["event_detection_score"] is not None
-        assert client.get("/prediction/latest").json()["timestamp"] == 101
-        assert client.post("/ingest", json=payload | {"spo2": 400}).status_code == 422
-        assert client.post("/ingest", json=payload).status_code == 422
-        result = client.post(
-            "/ingest/batch", json={"frames": [payload | {"timestamp": 102}, payload]}
-        ).json()
-        assert [r["accepted"] for r in result["results"]] == [True, False]
-        assert client.post("/session/stop").status_code == 200
-        assert client.post("/ingest", json=payload).status_code == 409
-        assert client.post("/session/start").status_code == 200
-        assert client.get("/prediction/latest").json() is None
+        # First frame in a fresh stream produces no prediction yet.
+        first = client.post("/ingest", json=payload)
+        assert first.status_code == 200
+        assert first.json()["risk_index"] is None
+
+        # Each later frame is timestamped with a freshly captured wall-clock
+        # value (never offset into the future) so the live snapshot taken
+        # right after is guaranteed to see it as current, not pending.
         demo_frame = payload | {
-            "timestamp": 103,
+            "timestamp": time.time(),
             "gps_latitude": 25.1869,
             "gps_longitude": 55.2671,
             "gps_speed": 12.5,
@@ -58,4 +59,22 @@ def test_api(models):
             "spo2": 98,
         }
         assert client.post("/ingest", json=demo_frame).status_code == 200
-        assert client.post("/reset").status_code == 200
+
+        live = client.get("/api/v1/predict/live", params={"stream_id": "trip"}).json()
+        assert live["status"] == "active"
+        assert live["heart"] == 74
+        assert live["spo2"] == 98
+        assert live["location"]["latitude"] == 25.1869
+
+        # Out-of-range / malformed fields are rejected, not silently dropped.
+        bad_ts = time.time()
+        assert client.post("/ingest", json=payload | {"timestamp": bad_ts, "spo2": 400}).status_code == 422
+        assert client.post(
+            "/ingest", json=payload | {"timestamp": bad_ts, "gps_latitude": 200}
+        ).status_code == 422
+        assert client.post(
+            "/ingest", json=payload | {"timestamp": bad_ts, "vehicle_speed": -1}
+        ).status_code == 422
+
+        # A duplicate/out-of-order timestamp on the same stream is rejected.
+        assert client.post("/ingest", json=payload).status_code == 422

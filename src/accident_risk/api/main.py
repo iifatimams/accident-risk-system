@@ -35,6 +35,12 @@ APP_UI_STATE: dict[str, dict] = {}
 
 # UI must not show a last-known danger score after the phone stops transmitting.
 EDGE_FRESHNESS_SECONDS = 10.0
+
+# Tolerate ordinary client clock drift, but reject frames whose declared
+# timestamp is implausibly ahead of the server's own clock (e.g. a buggy
+# client or corrupted replay), rather than silently accepting them and
+# having them simply never show up as "fresh" until the clock catches up.
+MAX_CLOCK_SKEW_SECONDS = 5.0
 LEGACY_RUNNER_SOURCES = {"ml_runner", "terminal_multimodal"}
 
 
@@ -296,9 +302,16 @@ def create_app(
                 # Legacy `speed` is km/h; schema `vehicle_speed` is m/s.
                 vehicle_speed = float(vehicle_speed) if body.get("vehicle_speed") is not None else float(vehicle_speed) / 3.6
 
+            request_timestamp = body.get("timestamp", time.time())
+            if (
+                isinstance(request_timestamp, (int, float))
+                and request_timestamp > time.time() + MAX_CLOCK_SKEW_SECONDS
+            ):
+                raise HTTPException(422, "timestamp is too far in the future")
+
             try:
                 frame = SensorFrame(
-                    timestamp=body.get("timestamp", time.time()),
+                    timestamp=request_timestamp,
                     stream_id=stream_id,
                     source=source_tag,
                     vehicle_speed=vehicle_speed,
@@ -311,6 +324,15 @@ def create_app(
                     gps_longitude=optional_value(body, "gps_longitude", "lon"),
                     heart_rate=(optional_value(body, "heart_rate", "instant_hr", "bpm") or None),
                     rr_interval_ms=body.get("rr_interval_ms"),
+                    spo2=body.get("spo2"),
+                    hrv_rmssd=body.get("hrv_rmssd"),
+                    physiology_signal_quality=body.get("physiology_signal_quality"),
+                    steering_angle=body.get("steering_angle"),
+                    tire_pressure_fl=body.get("tire_pressure_fl"),
+                    tire_pressure_fr=body.get("tire_pressure_fr"),
+                    tire_pressure_rl=body.get("tire_pressure_rl"),
+                    tire_pressure_rr=body.get("tire_pressure_rr"),
+                    sensor_timestamps=body.get("sensor_timestamps") or {},
                     accel_x=body.get("accel_x"),
                     accel_y=body.get("accel_y"),
                     accel_z=body.get("accel_z"),
@@ -334,12 +356,22 @@ def create_app(
             sync = engine.pipeline.synchronizer
             streams = list(sync.values)
             if stream_id is None:
+                # Silently picking one of several active streams would show
+                # the wrong driver's data; the caller must disambiguate.
+                if len(streams) > 1:
+                    raise HTTPException(
+                        400, "stream_id is required when multiple streams are active"
+                    )
                 stream_id = streams[0] if streams else "driver-default"
             now = time.time()
             snapshot = sync.snapshot(stream_id, now)
             fields = snapshot.model_dump()
             fresh = any(fields[key] is not None for key in SENSOR_FIELDS)
-            status = "active" if fresh else "stale"
+            status = (
+                "active" if fresh
+                else "stale" if stream_id in sync.values
+                else "waiting_for_hardware_stream"
+            )
 
             state = ui_state.get(stream_id, {})
             edge_owned = bool(state.get("edge_owned"))
