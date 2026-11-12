@@ -1,0 +1,191 @@
+{
+  "title": "RoadSense synthetic integration fixtures v1",
+  "seed": 20261113,
+  "synthetic_test_only": true,
+  "not_real_vehicle_data": true,
+  "not_real_uAE_routes": true,
+  "not_usable_to_claim_model_accuracy": true,
+  "not_for_training_without_independent_validation": true,
+  "not_for_real_alert_delivery": true,
+  "generated_utc": "2026-11-12T20:26:28.358282+00:00",
+  "format": "JSONL frames conform to src/accident_risk/schemas.py SensorFrame (optional fields omitted); separate CSV ground truth",
+  "cadences_hz": {
+    "imu": 10,
+    "gps": 1,
+    "obd_like": 2,
+    "whoop": null
+  },
+  "mounting": "idealized phone-fixed axes; no camera/photorealistic frames; no physical iPhone calibration",
+  "scenario_list": [
+    {
+      "scenario": "normal_cruise",
+      "outcome": "normal",
+      "description": "steady driving; no collision",
+      "stream_id": "sim_normal_cruise_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": null,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.346,
+        55.422
+      ],
+      "frames": "data/normal_cruise.jsonl",
+      "labels": "data/normal_cruise_labels.csv"
+    },
+    {
+      "scenario": "gentle_brake",
+      "outcome": "normal",
+      "description": "benign slowdown without obstacle",
+      "stream_id": "sim_gentle_brake_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": null,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.279,
+        55.364
+      ],
+      "frames": "data/gentle_brake.jsonl",
+      "labels": "data/gentle_brake_labels.csv"
+    },
+    {
+      "scenario": "normal_roundabout",
+      "outcome": "normal",
+      "description": "benign left turn; yaw not collision",
+      "stream_id": "sim_normal_roundabout_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": null,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.213,
+        55.402
+      ],
+      "frames": "data/normal_roundabout.jsonl",
+      "labels": "data/normal_roundabout_labels.csv"
+    },
+    {
+      "scenario": "stopped_pedestrian",
+      "outcome": "normal",
+      "description": "pedestrian visible while ego stopped",
+      "stream_id": "sim_stopped_pedestrian_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": null,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.121,
+        55.203
+      ],
+      "frames": "data/stopped_pedestrian.jsonl",
+      "labels": "data/stopped_pedestrian_labels.csv"
+    },
+    {
+      "scenario": "lead_vehicle_safe",
+      "outcome": "normal",
+      "description": "approach slower vehicle and brake safely",
+      "stream_id": "sim_lead_vehicle_safe_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": null,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.346,
+        55.422
+      ],
+      "frames": "data/lead_vehicle_safe.jsonl",
+      "labels": "data/lead_vehicle_safe_labels.csv"
+    },
+    {
+      "scenario": "lead_vehicle_nearmiss",
+      "outcome": "near_miss",
+      "description": "closing on stopping lead vehicle; strong avoidance brake",
+      "stream_id": "sim_lead_vehicle_nearmiss_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": null,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.279,
+        55.364
+      ],
+      "frames": "data/lead_vehicle_nearmiss.jsonl",
+      "labels": "data/lead_vehicle_nearmiss_labels.csv"
+    },
+    {
+      "scenario": "lead_vehicle_collision",
+      "outcome": "collision",
+      "description": "simulated rear-end collision at 28.0s",
+      "stream_id": "sim_lead_vehicle_collision_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": 28.0,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.213,
+        55.402
+      ],
+      "frames": "data/lead_vehicle_collision.jsonl",
+      "labels": "data/lead_vehicle_collision_labels.csv"
+    },
+    {
+      "scenario": "pedestrian_crossing_nearmiss",
+      "outcome": "near_miss",
+      "description": "pedestrian enters corridor; driver brakes to stop",
+      "stream_id": "sim_pedestrian_crossing_nearmiss_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": null,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.121,
+        55.203
+      ],
+      "frames": "data/pedestrian_crossing_nearmiss.jsonl",
+      "labels": "data/pedestrian_crossing_nearmiss_labels.csv"
+    },
+    {
+      "scenario": "pedestrian_crossing_collision",
+      "outcome": "collision",
+      "description": "simulated pedestrian conflict at 28.0s",
+      "stream_id": "sim_pedestrian_crossing_collision_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": 28.0,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.346,
+        55.422
+      ],
+      "frames": "data/pedestrian_crossing_collision.jsonl",
+      "labels": "data/pedestrian_crossing_collision_labels.csv"
+    },
+    {
+      "scenario": "gps_obd_dropout",
+      "outcome": "normal",
+      "description": "sensor interruptions and reacquisition",
+      "stream_id": "sim_gps_obd_dropout_20261113",
+      "samples": 401,
+      "duration_s": 40.0,
+      "frequency_hz": 10,
+      "onset_s": null,
+      "imu_unit": "m/s^2 excluding gravity",
+      "gps_anchor_approx": [
+        25.279,
+        55.364
+      ],
+      "frames": "data/gps_obd_dropout.jsonl",
+      "labels": "data/gps_obd_dropout_labels.csv"
+    }
+  ]
+}
