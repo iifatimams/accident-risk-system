@@ -353,14 +353,37 @@ smoothing evidence-gate test made results WORSE (75.0% accuracy), a real
 negative result: naive temporal smoothing should not be assumed to help
 without testing it, at least not on this single short session.
 
-What's NOT done:
+### 3.2/3.3 continued -- cross-driver (subject-separated) result
 
-- Multi-driver/multi-session training (this is one driver, one ~4-minute
-  session) -- 87 more DMD archives (~104GB) remain unextracted.
+Extended to 4 more drivers (gA-1, gB-6, gE-28 added to training; gF-23
+held out entirely for validation -- zero frames from that driver in
+training, a true subject-separated split per Phase 3.2's actual
+instruction). Full results:
+[docs/benchmarks/dmd_driver_state_multisession_v1.md](benchmarks/dmd_driver_state_multisession_v1.md).
+
+**Important, sobering result**: `not_looking_road` recall collapsed from
+0.896 (single-session) to **0.301** on the held-out driver, even though
+raw accuracy looked similar (0.851 -> 0.870, misleading due to class
+imbalance). This is real evidence the single-session baseline was
+substantially optimistic and did not generalize -- reported honestly
+rather than re-run or re-tuned until it looked better. Current honest
+conclusion: this frozen-backbone MobileNetV3 baseline is NOT yet
+evidence for deploying a DMD-trained model over the existing Apple Vision
+rule-based pipeline (Phase 2); if anything it's evidence to keep relying
+on Phase 2's rules until a properly cross-validated model clears a much
+higher bar.
+
+What's still NOT done:
+
+- n=1 held-out driver is not a statistically powered generalization
+  claim -- a real evaluation needs leave-one-driver-out across most/all
+  of DMD's 13-14 distraction participants. 82 more DMD archives (~100GB
+  across drowsiness/gaze/distraction) remain unextracted.
 - Any comparison against the existing Apple Vision rule-based system from
   Phase 2 (Phase 3.3's actual ask) -- needs DMD video through an
   iOS-equivalent Vision pipeline, not attempted.
-- Core ML export / on-device benchmark (Phase 3.4).
+- Core ML export / on-device benchmark (Phase 3.4) -- correctly not
+  pursued given the cross-driver result above.
 - drowsiness and gaze annotation types were audited (taxonomy confirmed)
   but no baseline was trained on them this session.
 
