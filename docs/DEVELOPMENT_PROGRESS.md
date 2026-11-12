@@ -295,17 +295,38 @@ a feasibility smoke test on n=40, not a statistically powered benchmark --
 per the directive's own instruction, this is NOT yet enough evidence for a
 fine-tuning decision (Phase 4.3's actual ask).
 
+### 4.2 continued -- SSDLite vs Faster R-CNN comparison
+
+Benchmarked a second, mobile-appropriate detector (SSDLite320-
+MobileNetV3-Large) on the exact same 40-image sample. Full results:
+[docs/benchmarks/bdd100k_detector_comparison_v1.md](benchmarks/bdd100k_detector_comparison_v1.md).
+
+Real, somewhat counterintuitive result: SSDLite has ~5.6x fewer
+parameters but was ~3x SLOWER per image on this Mac's PyTorch/MPS
+backend, and clearly less accurate (lower recall on every class with any
+true positives: car 0.072 vs 0.176, person 0.028 vs 0.056, truck 0.167 vs
+0.500, bus 0.200 vs 0.400). Explicitly flagged why this does NOT settle
+the architecture question: this Mac/MPS latency number says nothing
+about actual Core ML/iPhone Neural Engine performance (a different
+execution path entirely), and SSDLite remains the architecturally better
+Core ML export target regardless (no RPN/ROI-align stage, unlike the
+two-stage Faster R-CNN). Evidence-gated recommendation: evaluate on a
+much larger sample before choosing on accuracy grounds, and treat
+on-device latency as a separate, unmeasured question (Phase 4.4/4.5).
+
 What's NOT done:
 
-- DMD audit/extraction (Phase 3) -- deferred by the user's explicit choice
-  this session; 108GB raw archives remain unextracted.
+- DMD audit/extraction (Phase 3) -- now done (see Phase 3 section above),
+  including a cross-driver generalization result.
 - A larger (ideally full 10,000-image) BDD100K val run, and a day/night
   breakdown (the script doesn't currently read BDD100K's `timeofday`
-  attribute) -- both explicitly named as follow-ups in the results doc.
+  attribute) -- both explicitly named as follow-ups in the results docs.
 - SUMO/CARLA UAE simulation (Phase 8.1-8.3): neither is installed; not
   attempted this session.
-- Any Core ML export or on-device benchmark (Phase 4.4/4.5): this ran the
-  full PyTorch model on this Mac, not an exported/quantized mobile model.
+- Any Core ML export or on-device benchmark (Phase 4.4/4.5): both runs so
+  far used the full PyTorch model on this Mac, not an exported/quantized
+  mobile model -- the SSDLite-vs-Faster-R-CNN latency numbers above are
+  explicitly NOT a substitute for this.
 
 Verification: the benchmark script itself ran to completion with real
 data (see results doc); `.venv/bin/python -m pytest -q`: still **164
