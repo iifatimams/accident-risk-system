@@ -26,6 +26,20 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   @Published public var debugYaw: Double = 0.0
   @Published public var debugRoll: Double = 0.0
   @Published public var debugEAR: Double = 0.0
+  // MARK: Mounting + Performance Diagnostics
+  // Added so capture FPS, processing latency and mounting orientation can
+  // actually be measured on a real device instead of assumed. These are
+  // deliberately exposed on the dashboard, not just logged, because the
+  // only way to validate camera performance claims is to watch real numbers
+  // while driving/parked -- see docs/DEVELOPMENT_PROGRESS.md Phase 1.
+  @Published public var currentOrientation: PhoneOrientation = .portrait
+  @Published public var frontDeliveredFps: Double = 0.0
+  @Published public var backDeliveredFps: Double = 0.0
+  @Published public var frontProcessingLatencyMs: Double = 0.0
+  @Published public var backProcessingLatencyMs: Double = 0.0
+  private var frontFrameTimestamps: [CFAbsoluteTime] = []
+  private var backFrameTimestamps: [CFAbsoluteTime] = []
+  private let fpsWindowSize = 10
   private var multiCamSession: AVCaptureMultiCamSession?
   private let frontQueue = DispatchQueue(
     label: "front_camera_queue",
@@ -48,6 +62,31 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     super.init()
   }
   public func startCamera() {
+    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(deviceOrientationDidChange),
+      name: UIDevice.orientationDidChangeNotification,
+      object: nil
+    )
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(sessionWasInterrupted),
+      name: AVCaptureSession.wasInterruptedNotification,
+      object: nil
+    )
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(sessionInterruptionEnded),
+      name: AVCaptureSession.interruptionEndedNotification,
+      object: nil
+    )
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(sessionRuntimeError),
+      name: AVCaptureSession.runtimeErrorNotification,
+      object: nil
+    )
     Task.detached {
       switch AVCaptureDevice.authorizationStatus(for: .video) {
       case .authorized:
@@ -73,6 +112,72 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       self.cameraStatus = "failed: \(reason)"
     }
   }
+  // MARK: Orientation
+  // UIDeviceOrientation is translated to the UIKit-free `PhoneOrientation`
+  // from CameraOrientation.swift immediately, so the actual rotation-angle
+  // decision stays unit-testable. `.faceUp`/`.faceDown`/`.unknown` have no
+  // defined rotation and keep whatever the last known orientation was,
+  // rather than guessing -- those cases mean the phone is lying flat
+  // (unmounted) or the accelerometer can't tell, not that it changed.
+  private func mappedDeviceOrientation(_ device: UIDeviceOrientation) -> PhoneOrientation? {
+    switch device {
+    case .portrait: return .portrait
+    case .portraitUpsideDown: return .portraitUpsideDown
+    case .landscapeLeft: return .landscapeLeft
+    case .landscapeRight: return .landscapeRight
+    default: return nil
+    }
+  }
+  // UIDevice posts this notification on the main thread, so this can touch
+  // the @Published currentOrientation directly without a MainActor hop.
+  @objc private func deviceOrientationDidChange() {
+    guard
+      let orientation = mappedDeviceOrientation(UIDevice.current.orientation),
+      orientation != currentOrientation
+    else {
+      return
+    }
+    currentOrientation = orientation
+    applyRotation(for: orientation)
+  }
+  private func applyRotation(for orientation: PhoneOrientation) {
+    let frontAngle = videoRotationAngle(for: orientation, camera: .front)
+    let backAngle = videoRotationAngle(for: orientation, camera: .back)
+    if let connection = frontConnection,
+      connection.isVideoRotationAngleSupported(frontAngle)
+    {
+      connection.videoRotationAngle = frontAngle
+    }
+    if let connection = backConnection,
+      connection.isVideoRotationAngleSupported(backAngle)
+    {
+      connection.videoRotationAngle = backAngle
+    }
+  }
+  // MARK: Session Lifecycle
+  // Without these, a phone call, Siri, another app grabbing the camera, or a
+  // transient hardware fault silently stops frame delivery -- the dashboard
+  // would keep showing the last cached state (e.g. "eyesOnRoad: true")
+  // forever instead of surfacing that the camera actually stopped.
+  @objc private func sessionWasInterrupted(_ note: Notification) {
+    Task { @MainActor in
+      self.cameraStatus = "interrupted"
+    }
+  }
+  @objc private func sessionInterruptionEnded(_ note: Notification) {
+    Task { @MainActor in
+      self.cameraStatus = "running"
+    }
+  }
+  @objc private func sessionRuntimeError(_ note: Notification) {
+    reportCameraFailure("Session runtime error; restarting")
+    // AVCaptureMultiCamSession does not reliably recover on its own from a
+    // runtime error (e.g. the system reclaiming camera hardware under
+    // thermal pressure). Restarting from scratch is simpler and safer than
+    // trying to patch the existing session back to a running state.
+    stopCamera()
+    startCamera()
+  }
   // Called the moment driving is confirmed (speed sustained above the
   // threshold). Eye-closed/distraction timers run continuously even while
   // parked, so without this reset, time spent looking down or with eyes
@@ -89,12 +194,16 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
   }
   public func stopCamera() {
+    NotificationCenter.default.removeObserver(self)
+    UIDevice.current.endGeneratingDeviceOrientationNotifications()
     multiCamSession?.stopRunning()
     multiCamSession = nil
     distractedStartTime = nil
     eyesClosedStart = nil
     fixedGazeStart = nil
     noFaceStartTime = nil
+    frontFrameTimestamps.removeAll()
+    backFrameTimestamps.removeAll()
     Task { @MainActor in
       self.eyesOnRoad = true
       self.eyesClosedSec = 0.0
@@ -106,12 +215,23 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       self.pedestriansDetected = false
       self.pedestrianCount = 0
       self.cameraStatus = "idle"
+      self.frontDeliveredFps = 0.0
+      self.backDeliveredFps = 0.0
+      self.frontProcessingLatencyMs = 0.0
+      self.backProcessingLatencyMs = 0.0
     }
   }
   private func setupMultiCam() {
     guard AVCaptureMultiCamSession.isMultiCamSupported else {
       reportCameraFailure("Multi-camera capture is not supported on this device")
       return
+    }
+    // Seed from whatever orientation the phone is actually in when capture
+    // starts, rather than assuming portrait. deviceOrientationDidChange keeps
+    // this correct afterward if the mount changes mid-session.
+    let startupOrientation = mappedDeviceOrientation(UIDevice.current.orientation) ?? .portrait
+    Task { @MainActor in
+      self.currentOrientation = startupOrientation
     }
     let session = AVCaptureMultiCamSession()
     session.beginConfiguration()
@@ -162,8 +282,9 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         inputPorts: [frontPort],
         output: frontOutput
       )
-      if connection.isVideoRotationAngleSupported(90.0) {
-        connection.videoRotationAngle = 90.0
+      let angle = videoRotationAngle(for: startupOrientation, camera: .front)
+      if connection.isVideoRotationAngleSupported(angle) {
+        connection.videoRotationAngle = angle
       }
       if session.canAddConnection(connection) {
         session.addConnection(connection)
@@ -217,8 +338,9 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         inputPorts: [backPort],
         output: backOutput
       )
-      if connection.isVideoRotationAngleSupported(90.0) {
-        connection.videoRotationAngle = 90.0
+      let angle = videoRotationAngle(for: startupOrientation, camera: .back)
+      if connection.isVideoRotationAngleSupported(angle) {
+        connection.videoRotationAngle = angle
       }
       if session.canAddConnection(connection) {
         session.addConnection(connection)
@@ -245,10 +367,60 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     else {
       return
     }
+    let frameArrival = CFAbsoluteTimeGetCurrent()
     if connection == frontConnection {
+      recordDeliveredFrame(timestamps: &frontFrameTimestamps, at: frameArrival, isFront: true)
       processDriverFace(pixelBuffer)
+      publishProcessingLatency(since: frameArrival, isFront: true)
     } else if connection == backConnection {
+      recordDeliveredFrame(timestamps: &backFrameTimestamps, at: frameArrival, isFront: false)
       processRoadTraffic(pixelBuffer)
+      publishProcessingLatency(since: frameArrival, isFront: false)
+    }
+  }
+  // MARK: Capture Diagnostics
+  // Delivered FPS is measured from actual sample-buffer arrivals, not the
+  // configured activeVideoMinFrameDuration -- the two can diverge under
+  // thermal throttling, low light (longer exposure), or if the risk engine
+  // or network uploader ever blocks this queue. Published so real numbers
+  // are visible on the dashboard instead of assumed from the config value.
+  private func recordDeliveredFrame(
+    timestamps: inout [CFAbsoluteTime], at now: CFAbsoluteTime, isFront: Bool
+  ) {
+    timestamps.append(now)
+    if timestamps.count > fpsWindowSize {
+      timestamps.removeFirst(timestamps.count - fpsWindowSize)
+    }
+    guard timestamps.count >= 2,
+      let first = timestamps.first
+    else {
+      return
+    }
+    let elapsed = now - first
+    guard elapsed > 0 else {
+      return
+    }
+    let fps = Double(timestamps.count - 1) / elapsed
+    Task { @MainActor in
+      if isFront {
+        self.frontDeliveredFps = fps
+      } else {
+        self.backDeliveredFps = fps
+      }
+    }
+  }
+  // Processing latency: time from frame arrival to Vision (and, for the rear
+  // camera, the rectangle/pedestrian requests) completing on this same
+  // serial queue. This is what determines whether a frame can be fully
+  // processed before the next one arrives at the configured capture rate.
+  private func publishProcessingLatency(since start: CFAbsoluteTime, isFront: Bool) {
+    let latencyMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+    Task { @MainActor in
+      if isFront {
+        self.frontProcessingLatencyMs = latencyMs
+      } else {
+        self.backProcessingLatencyMs = latencyMs
+      }
     }
   }
   private func getEyeOpenness(

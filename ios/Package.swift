@@ -1,6 +1,17 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
+// NOTE: this package is consumed only by the `swift build`/`swift test` CLI
+// workflow. The real iOS app is built by ios/RoadSense.xcodeproj directly from
+// the RoadSense/ source tree (plain Xcode file references, not an SPM
+// package dependency), so nothing here affects that build. This package
+// previously declared a "RoadSense" target meant to mirror the whole app, but
+// it imports UIKit/AVFoundation multi-cam APIs and references generated CoreML
+// model classes that only exist in an Xcode build -- it could never actually
+// compile via `swift build` on macOS, which is why `swift test` had no working
+// target to run until now. It has been removed rather than patched further:
+// gutting it down to something that *does* compile on macOS would leave an
+// empty, pointless duplicate of the real app target.
 let package = Package(
     name: "RoadSense",
     defaultLocalization: "en",
@@ -9,25 +20,43 @@ let package = Package(
         .iOS(.v16)
     ],
     products: [
-        // Exposes RoadSense as an executable app/library target
         .library(
-            name: "RoadSense",
-            targets: ["RoadSense"]
+            name: "RoadSenseAuth",
+            targets: ["RoadSenseAuth"]
         )
     ],
-    dependencies: [
-        // All services (CoreLocation, CoreBluetooth, CoreMotion, Foundation) 
-        // are native Apple system frameworks, so no third-party CocoaPods or SPM packages are needed.
-    ],
+    dependencies: [],
     targets: [
+        // A subset of RoadSense's own source files that have no UIKit/
+        // AVFoundation/CoreML-codegen dependency, so they can be unit tested
+        // with plain `swift test` on macOS. These are the SAME files compiled
+        // into the real app by the Xcode project above -- this target doesn't
+        // copy or fork them.
         .target(
-            name: "RoadSense",
+            name: "RoadSenseAuth",
             dependencies: [],
             path: "RoadSense",
-            resources: [
-                // Links Info.plist so background modes and permissions are bundled properly
-                .process("Info.plist")
+            exclude: [
+                "App",
+                "Info.plist",
+                "RoadSense.entitlements",
+                "Models/FusionModel.mlpackage",
+                "Models/VZCrashModel.mlpackage",
+                "Models/SensorFrame.swift",
+                "Services/BackgroundCaptureService.swift",
+                "Services/CollisionDetector.swift",
+                "Services/CollisionIncidentStore.swift",
+                "Services/ContextManager.swift",
+                "Services/ObdBleClient.swift",
+                "Services/RoadSenseOnDeviceRiskEngine.swift",
+                "Services/Uploader.swift",
+                "Services/WhoopClient.swift",
             ]
-        )
+        ),
+        .testTarget(
+            name: "RoadSenseAuthTests",
+            dependencies: ["RoadSenseAuth"],
+            path: "Tests"
+        ),
     ]
 )
