@@ -429,10 +429,53 @@ the Swift fix compiles). No Android, `data/raw`, or real-database changes
 -- the real `data/app.sqlite3` was never opened by anything in this
 session; only synthetic/tmp_path databases were used for testing.
 
-Remaining checkpoint resume tasks (#3 incident-dedup persistence, #4
-lifecycle enforcement for confirm/cancel, #5 iOS lifecycle tests, #6
-family monitoring UI/real provider, #7 research consent/export
-verification) are not started.
+### #3: incident deduplication is now persistent and atomic -- FIXED
+
+Confirmed the bug: `SessionRecorder._incident_ids_seen` was a plain
+in-process `dict[str, int]`, and its check (`.get(...)` under one lock
+acquisition) and create (`db.create_alert(...)` then a LATER lock
+acquisition to record the id) were two separate steps, not one atomic
+operation. Two concrete failure modes, both now fixed:
+
+- **Lost on restart**: a retried/offline-queued upload of the same
+  `client_incident_id` arriving after the server process restarted would
+  find an empty cache and create a SECOND alert for the same real event.
+- **Not atomic**: two concurrent requests for the same `client_incident_id`
+  (e.g. the immediate on-device report and a retry-timer upload landing
+  before either response returns) could both pass the "not seen yet"
+  check before either one recorded it, each creating its own alert.
+
+Fixed by moving the dedup key into the database itself: added a
+`client_incident_id TEXT` column + `UNIQUE` index on `alerts` (idempotent
+migration in `Database._migrate`, same pattern as #2 above -- SQLite
+treats every `NULL` as distinct under `UNIQUE`, so the many `high_risk`/
+manual-report alerts with no `client_incident_id` never collide with each
+other). Added `Database.get_or_create_collision_alert()`: a single
+`INSERT ... ON CONFLICT(client_incident_id) DO NOTHING`, which SQLite's
+own writer serialization makes atomic regardless of how many concurrent
+callers race on it, falling back to a plain `SELECT` only when nothing
+was inserted. `SessionRecorder._check_collision` now uses this (and a new
+read-only `get_alert_by_client_incident_id` for the case where there's no
+active session to attach a brand-new incident to, e.g. a retry arriving
+after the session already ended) instead of the removed in-memory dict.
+
+Four new tests in `tests/test_app_api.py`, matching the checkpoint's own
+list: retry after the session ended (stream released from the recorder's
+in-memory state, must still resolve via the database), dedup surviving an
+actual simulated server restart (two separate `create_app()`/`Database`
+instances sharing one sqlite file, no in-memory state carried over at
+all), 16 real concurrent threads hitting
+`get_or_create_collision_alert` directly with the same id (asserts
+exactly one row is ever created and every caller agrees on its id -- run
+5x locally to rule out flakiness), and a sanity check that two different
+drivers' distinct incident ids never get merged.
+
+Verification: `.venv/bin/python -m pytest -q`: **171 passed** (167
+before, 4 new). No Android, `data/raw`, or real-database changes.
+
+Remaining checkpoint resume tasks (#4 lifecycle enforcement for
+confirm/cancel, #5 iOS lifecycle tests, #6 family monitoring UI/real
+provider, #7 research consent/export verification) are not started.
 
 ## Phases 5-19
 

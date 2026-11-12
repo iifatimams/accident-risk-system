@@ -145,9 +145,19 @@ CREATE TABLE IF NOT EXISTS alerts (
     -- "manual_report"). Kept here, not a separate table, since every
     -- collision incident already IS an alert row with kind='collision';
     -- JSON so new fields never need a migration.
-    detail_json   TEXT    NOT NULL DEFAULT '{}'
+    detail_json   TEXT    NOT NULL DEFAULT '{}',
+    -- Globally-unique id the on-device detector generates once per detected
+    -- event (see CollisionDetector.swift). The durable dedup key for a
+    -- retried/offline-queued re-upload of the SAME event: NULL for every
+    -- high_risk alert and manual collision report, which never collide
+    -- with each other (SQLite treats every NULL as distinct under UNIQUE).
+    client_incident_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
+-- idx_alerts_client_incident_id is created in Database._migrate(), not here:
+-- it must run AFTER the column-backfill migration below, since a database
+-- created before client_incident_id existed would otherwise fail this
+-- CREATE INDEX with "no such column" before _migrate ever runs.
 
 -- Consent-based family monitoring. A contact is NOT a users() row -- they
 -- never log in; invite_token (shared by the driver out-of-band, there is no
@@ -262,6 +272,15 @@ class Database:
             connection.execute(
                 "ALTER TABLE alerts ADD COLUMN detail_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "client_incident_id" not in existing_columns:
+            connection.execute("ALTER TABLE alerts ADD COLUMN client_incident_id TEXT")
+        # Created here (not in SCHEMA) so it always runs AFTER the column
+        # exists, whether this is a brand-new database (column just added by
+        # CREATE TABLE above) or one migrated by the ALTER TABLE just above.
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_client_incident_id "
+            "ON alerts(client_incident_id)"
+        )
 
     # ---------------------------------------------------------------- users
 
@@ -589,6 +608,17 @@ class Database:
             row = connection.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
             return self._decode_alert(dict(row)) if row else None
 
+    def get_alert_by_client_incident_id(self, client_incident_id: str) -> dict[str, Any] | None:
+        """Read-only lookup for a retry that has no active session to attach
+        a NEW incident to (e.g. arriving after the session ended, or after
+        this process restarted) -- still must recognize an id it already
+        knows about, even though it cannot create one without a session."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM alerts WHERE client_incident_id = ?", (client_incident_id,)
+            ).fetchone()
+            return self._decode_alert(dict(row)) if row else None
+
     def create_alert(
         self, user_id: int, kind: str, *, session_id: int | None = None,
         risk_index: float | None = None, latitude: float | None = None,
@@ -611,6 +641,55 @@ class Database:
                 ),
             )
             return self._decode_alert(self._row(connection, "alerts", int(cursor.lastrowid)))
+
+    def get_or_create_collision_alert(
+        self, client_incident_id: str, user_id: int, session_id: int | None,
+        *, latitude: float | None = None, longitude: float | None = None,
+        status: str = "suspected", detail: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically and durably deduplicate a collision incident by its
+        client-generated id. Checkpoint resume task #3: the previous
+        in-process `_incident_ids_seen` dict in SessionRecorder was lost on
+        every server restart, and its separate check-then-create (one lock
+        acquisition to check, a later one to record) was not atomic -- two
+        concurrent retries of the SAME incident (the immediate report and a
+        10s-later retry-timer upload both landing before either response
+        returns) could each pass the "not seen" check and create two rows
+        for one real event.
+
+        A single INSERT ... ON CONFLICT DO NOTHING against the UNIQUE
+        idx_alerts_client_incident_id index is both: SQLite's own writer
+        serialization makes the check-and-insert atomic regardless of how
+        many concurrent callers race here, and the dedup key lives in the
+        database itself, so it survives a server restart -- a retry
+        arriving after this process restarted still finds the original row.
+
+        Returns (alert, created): `created` is False when an existing
+        incident (from an earlier call, possibly a previous process) was
+        returned instead of a new one being made, so callers can decide
+        whether to run first-time-only side effects (e.g. the
+        suspected -> awaiting_confirmation promotion) only when something
+        was actually just created.
+        """
+        if status not in ALERT_STATUSES:
+            raise ValueError(f"Unknown alert status: {status}")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO alerts(session_id, user_id, kind, status, created_at, "
+                "latitude, longitude, detail_json, client_incident_id) "
+                "VALUES (?, ?, 'collision', ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(client_incident_id) DO NOTHING",
+                (
+                    session_id, user_id, status, time.time(), latitude, longitude,
+                    json.dumps(detail or {}, separators=(",", ":")), client_incident_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                row = connection.execute(
+                    "SELECT * FROM alerts WHERE client_incident_id = ?", (client_incident_id,)
+                ).fetchone()
+                return self._decode_alert(dict(row)), False
+            return self._decode_alert(self._row(connection, "alerts", int(cursor.lastrowid))), True
 
     def set_alert_status(
         self, alert_id: int, status: str, acknowledged_by: int | None = None,

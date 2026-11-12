@@ -45,12 +45,6 @@ class SessionRecorder:
         self._last_alert: dict[str, float] = {}
         self._last_seen: dict[str, float] = {}
         self._last_collision_detection: dict[str, float] = {}
-        # client_incident_id -> alert_id. Deliberately NOT cleared on
-        # register/release: a client_incident_id is a globally-unique UUID
-        # generated once by the on-device detector, so a retry arriving
-        # after the stream was re-registered (e.g. app relaunch) must still
-        # be recognized as the same incident.
-        self._incident_ids_seen: dict[str, int] = {}
 
     def register(self, stream_id: str, session_id: int) -> None:
         """Begin recording frames for a stream."""
@@ -97,19 +91,19 @@ class SessionRecorder:
         exact same detected event is recognized and returns the EXISTING
         alert's current state (which may have moved on from
         awaiting_confirmation by now), never creating a second one,
-        regardless of how much time has passed. The time-window cooldown
-        below remains as a fallback for frames with no id (legacy/non-iOS
-        sources) and as defense in depth.
+        regardless of how much time has passed OR whether this process has
+        restarted since the original detection -- the dedup key lives in
+        the database (Database.get_or_create_collision_alert), not an
+        in-process cache. The time-window cooldown below remains as a
+        fallback for frames with no id (legacy/non-iOS sources) and as
+        defense in depth.
         """
         suspicion = collision_detector.check(frame)
         if suspicion is None or not suspicion.triggered:
             return None
 
         if frame.client_incident_id is not None:
-            with self._lock:
-                known_alert_id = self._incident_ids_seen.get(frame.client_incident_id)
-            if known_alert_id is not None:
-                return self.db.get_alert(known_alert_id)
+            return self._get_or_create_known_incident(frame, suspicion)
 
         with self._lock:
             session_id = self._sessions.get(frame.stream_id)
@@ -117,8 +111,7 @@ class SessionRecorder:
                 return None
             now = frame.timestamp
             suppressed = (
-                frame.client_incident_id is None
-                and now - self._last_collision_detection.get(frame.stream_id, 0.0)
+                now - self._last_collision_detection.get(frame.stream_id, 0.0)
                 < COLLISION_DETECTION_COOLDOWN_SECONDS
             )
             if suppressed:
@@ -136,20 +129,63 @@ class SessionRecorder:
             "detection_score": suspicion.score,
             "accel_magnitude_ms2": suspicion.accel_magnitude_ms2,
         }
-        if frame.client_incident_id is not None:
-            detail["client_incident_id"] = frame.client_incident_id
         incident = self.db.create_alert(
             session["user_id"], "collision", session_id=session_id,
             latitude=frame.gps_latitude, longitude=frame.gps_longitude,
             status="suspected", detail=detail,
         )
-        if frame.client_incident_id is not None:
-            with self._lock:
-                self._incident_ids_seen[frame.client_incident_id] = incident["id"]
         # Immediately promote suspected -> awaiting_confirmation: the driver
         # is now being asked. Kept as two steps (not created directly in the
         # later state) so the lifecycle transition itself is exercised and
         # audited, not merely asserted.
+        return self.db.set_alert_status(
+            incident["id"], "awaiting_confirmation", enforce_lifecycle=True
+        )
+
+    def _get_or_create_known_incident(
+        self, frame: SensorFrame, suspicion: Any
+    ) -> dict[str, Any] | None:
+        """client_incident_id path: durable, atomic dedup via the database
+        (see get_or_create_collision_alert's own docstring). No session
+        lookup is required to RECOGNIZE a duplicate -- only to create a new
+        incident -- so a retry that outlives its session (app relaunched,
+        stream re-registered under the same still-pending client_incident_id)
+        still correctly returns the existing incident rather than silently
+        dropping it for lack of an active session."""
+        with self._lock:
+            session_id = self._sessions.get(frame.stream_id)
+        session = self.db.get_session(session_id) if session_id is not None else None
+
+        if session is None:
+            # No active session to attach a NEW incident to (alerts.user_id
+            # is NOT NULL) -- but a RETRY of an incident already recorded
+            # under an earlier session (app relaunched and re-registered the
+            # stream, or this arrives after the session ended / after a
+            # server restart) must still resolve to that existing incident,
+            # matching the dedup contract regardless of session lifetime.
+            # Read-only: never attempts to create one without a user_id.
+            return self.db.get_alert_by_client_incident_id(frame.client_incident_id)
+
+        detail = {
+            "source": "automatic_detector",
+            "model_version": suspicion.model_version,
+            "onset_estimate": suspicion.onset_estimate,
+            "detection_score": suspicion.score,
+            "accel_magnitude_ms2": suspicion.accel_magnitude_ms2,
+            "client_incident_id": frame.client_incident_id,
+        }
+        incident, created = self.db.get_or_create_collision_alert(
+            frame.client_incident_id, session["user_id"], session_id,
+            latitude=frame.gps_latitude, longitude=frame.gps_longitude,
+            status="suspected", detail=detail,
+        )
+        if not created:
+            # Someone (this process earlier, or another concurrent request
+            # right now) already created this exact incident -- return its
+            # CURRENT state as-is. It may have moved on from "suspected"
+            # already; never re-run the promotion below for an incident
+            # that already exists.
+            return incident
         return self.db.set_alert_status(
             incident["id"], "awaiting_confirmation", enforce_lifecycle=True
         )
