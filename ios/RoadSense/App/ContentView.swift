@@ -542,9 +542,25 @@ public struct ContentView: View {
                     .padding(.bottom, 30)
                 }
             }
+            // Offline-capable: Confirm/Dismiss write to CollisionIncidentStore
+            // directly and only best-effort attempt the server afterward --
+            // this overlay works with zero connectivity. Non-dismissable by
+            // swipe (unlike a sheet) since this is a safety prompt, not a
+            // casual screen. suspectedCollision is cleared by the confirm/
+            // dismiss call itself, so acting on it removes this overlay and
+            // it will not reappear for the same incident id.
+            .overlay {
+                if let suspicion = captureService.suspectedCollision {
+                    CollisionAlertOverlay(
+                        suspicion: suspicion,
+                        onConfirm: { captureService.confirmSuspectedCollision(id: suspicion.id) },
+                        onDismiss: { captureService.dismissSuspectedCollision(id: suspicion.id) }
+                    )
+                }
+            }
         }
     }
-    
+
     private func startDriverSession() {
         guard let token = auth.token,
               let url = URL(string: "\(auth.baseUrl)/app/api/driver/session/start") else { return }
@@ -585,5 +601,59 @@ public struct ContentView: View {
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
         URLSession.shared.dataTask(with: req).resume()
+    }
+}
+
+// MARK: - Collision Confirmation
+/// Shown the instant CollisionDetector triggers. Confirm/Dismiss call back
+/// into BackgroundCaptureService, which writes to CollisionIncidentStore
+/// synchronously -- this view needs no network to be fully usable.
+public struct CollisionAlertOverlay: View {
+    public let suspicion: CollisionSuspicion
+    public let onConfirm: () -> Void
+    public let onDismiss: () -> Void
+
+    public var body: some View {
+        ZStack {
+            Color.black.opacity(0.6).ignoresSafeArea()
+            VStack(spacing: 16) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 44))
+                    .foregroundColor(.red)
+                Text("Possible Collision Detected")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                Text("A sudden impact was detected. Were you in an accident?")
+                    .font(.subheadline)
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(.secondary)
+                Text("This works without an internet connection; it will sync automatically.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 4)
+                Button(action: onConfirm) {
+                    Text("Yes, I Was in an Accident")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.red)
+                        .cornerRadius(12)
+                }
+                Button(action: onDismiss) {
+                    Text("No, False Alarm")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color(.secondarySystemBackground))
+                        .cornerRadius(12)
+                }
+            }
+            .padding(24)
+            .background(Color(.systemBackground))
+            .cornerRadius(20)
+            .padding(.horizontal, 30)
+            .shadow(radius: 20)
+        }
     }
 }

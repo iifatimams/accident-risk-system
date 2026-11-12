@@ -396,6 +396,314 @@ def test_collision_alert_can_be_cancelled_by_the_driver(client, people):
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
 
 
+def test_automatic_collision_detection_is_independent_and_suppresses_duplicates(
+    client, people
+):
+    """Independent collision detection: synthetic fixtures only -- this is a
+    rule-based kinematic trigger, not validated against a real impact, and
+    this test does not claim otherwise."""
+    headers = sign_in(client, "+971501110001")
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    stream_id = started["stream_id"]
+
+    def send(accel_x, accel_y, accel_z):
+        return client.post("/ingest", json={
+            "timestamp": time.time(),
+            "source": "synthetic_test",
+            "stream_id": stream_id,
+            "accel_x": accel_x, "accel_y": accel_y, "accel_z": accel_z,
+        })
+
+    # Ordinary driving and a hard brake: no incident.
+    assert send(0.1, 0.1, 9.8).status_code == 200
+    assert send(11.0, 0.2, 9.8).status_code == 200
+    assert client.get("/app/api/alerts", headers=headers).json() == []
+
+    # A simulated impact spike: creates a suspected-then-awaiting-confirmation
+    # incident automatically, independent of any risk/prediction score --
+    # the frame above carries no risk fields at all.
+    assert send(25.0, 0.0, 5.0).status_code == 200
+    alerts = client.get("/app/api/alerts", headers=headers).json()
+    assert len(alerts) == 1
+    incident = alerts[0]
+    assert incident["kind"] == "collision"
+    assert incident["status"] == "awaiting_confirmation"
+    assert incident["detail"]["source"] == "automatic_detector"
+    assert incident["detail"]["model_version"]
+    assert incident["detail"]["detection_score"] >= 1.0
+    assert incident["detail"]["onset_estimate"] is not None
+
+    # A second impact-level spike right after is suppressed as a duplicate.
+    assert send(25.0, 0.0, 5.0).status_code == 200
+    assert len(client.get("/app/api/alerts", headers=headers).json()) == 1
+
+
+def test_client_incident_id_survives_offline_retry_after_the_cooldown_window(
+    client, people, monkeypatch
+):
+    """Synthetic fixture: simulates the iOS app's offline retry -- the SAME
+    client_incident_id re-uploaded long after the normal cooldown window
+    must still resolve to the ORIGINAL incident, not create a second one.
+    This is what makes reconnection-after-offline duplicate-safe."""
+    clock = [4_000_000.0]
+    monkeypatch.setattr("time.time", lambda: clock[0])
+    headers = sign_in(client, "+971501110001")
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+
+    first = client.post("/ingest", json={
+        "timestamp": clock[0], "source": "ios", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+        "client_incident_id": "test-incident-abc123",
+    })
+    assert first.status_code == 200
+    original_alert_id = first.json()["collision_alert_id"]
+    assert original_alert_id is not None
+
+    # The driver confirms while still "offline" from the server's point of
+    # view (this call itself succeeds -- confirming simulates the moment
+    # connectivity returns and the app syncs the locally-recorded decision).
+    client.post(f"/app/api/alerts/{original_alert_id}/confirm", headers=headers)
+
+    # Far past COLLISION_DETECTION_COOLDOWN_SECONDS (120s) -- the retried
+    # upload of the exact same detected event, as an offline queue would
+    # eventually resend it.
+    clock[0] += 600.0
+    retry = client.post("/ingest", json={
+        "timestamp": clock[0], "source": "ios", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+        "client_incident_id": "test-incident-abc123",
+    })
+    assert retry.status_code == 200
+    assert retry.json()["collision_alert_id"] == original_alert_id
+
+    alerts = client.get("/app/api/alerts", headers=headers).json()
+    assert len(alerts) == 1
+    assert alerts[0]["status"] == "confirmed"  # the retry did not reset it to awaiting_confirmation
+
+
+def test_collision_incident_lifecycle_dismiss_resolve_and_invalid_transitions(
+    client, people
+):
+    headers = sign_in(client, "+971501110001")
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+    })
+    incident = client.get("/app/api/alerts", headers=headers).json()[0]
+
+    # Cannot resolve directly from awaiting_confirmation -- must go through
+    # confirmed/dismissed/unconfirmed_timeout first.
+    invalid = client.post(f"/app/api/alerts/{incident['id']}/resolve", headers=headers)
+    assert invalid.status_code == 409
+
+    dismissed = client.post(f"/app/api/alerts/{incident['id']}/dismiss", headers=headers)
+    assert dismissed.status_code == 200 and dismissed.json()["status"] == "dismissed"
+
+    resolved = client.post(f"/app/api/alerts/{incident['id']}/resolve", headers=headers)
+    assert resolved.status_code == 200 and resolved.json()["status"] == "resolved"
+
+    # A resolved incident is terminal -- no further transition is valid.
+    again = client.post(f"/app/api/alerts/{incident['id']}/resolve", headers=headers)
+    assert again.status_code == 409
+
+
+def test_unconfirmed_collision_incident_times_out(client, app, people, monkeypatch):
+    clock = [3_000_000.0]
+    monkeypatch.setattr("time.time", lambda: clock[0])
+    headers = sign_in(client, "+971501110001")
+
+    # A family contact, so the timeout notification's wording can be
+    # checked directly -- it must never claim a verified accident.
+    contact = client.post(
+        "/app/api/driver/family-contacts", headers=headers,
+        json={"name": "Watchful Uncle", "phone": "+971500000555"},
+    ).json()
+    client.post("/app/api/family/accept", json={"token": contact["invite_token"]})
+
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": clock[0], "source": "synthetic_test", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+    })
+    incident = client.get("/app/api/alerts", headers=headers).json()[0]
+    assert incident["status"] == "awaiting_confirmation"
+
+    # Still within the window: no change yet, and nothing sent to family.
+    clock[0] += 60.0
+    still_waiting = client.get("/app/api/alerts", headers=headers).json()[0]
+    assert still_waiting["status"] == "awaiting_confirmation"
+    assert app.state.notification_sender.sent == []
+
+    # Past the timeout window: the call-on-access sweep moves it AND
+    # notifies family -- but the message must be honest that this is an
+    # UNCONFIRMED sensor trigger, never worded as a verified accident.
+    clock[0] += 180.0
+    timed_out = client.get("/app/api/alerts", headers=headers).json()[0]
+    assert timed_out["status"] == "unconfirmed_timeout"
+    sent = app.state.notification_sender.sent
+    assert len(sent) == 1
+    message = sent[0]["message"].lower()
+    assert "not been confirmed" in message or "unconfirmed" in message
+    assert "confirmed they were in a collision" not in message
+
+
+def test_family_contact_invite_accept_and_revoke(client, people):
+    """Explicit consent: a contact only ever becomes notifiable by using
+    their own invite_token -- never assumed, never driver-granted on their
+    behalf."""
+    headers = sign_in(client, "+971501110001")
+    invited = client.post(
+        "/app/api/driver/family-contacts", headers=headers,
+        json={"name": "Aunt Mona", "phone": "+971500000111", "relationship": "aunt"},
+    )
+    assert invited.status_code == 201
+    contact = invited.json()
+    assert contact["status"] == "invited"
+    token = contact["invite_token"]
+
+    # Not yet notifiable: invited, not accepted.
+    assert client.get("/app/api/driver/family-contacts", headers=headers).json()[0]["status"] == "invited"
+
+    accepted = client.post("/app/api/family/accept", json={"token": token})
+    assert accepted.status_code == 200 and accepted.json()["status"] == "accepted"
+
+    listed = client.get("/app/api/driver/family-contacts", headers=headers).json()
+    assert listed[0]["status"] == "accepted"
+
+    # The same token cannot be used again (not reusable to re-authorize).
+    reused = client.post("/app/api/family/accept", json={"token": token})
+    assert reused.status_code == 404
+
+    revoked = client.post(
+        f"/app/api/driver/family-contacts/{contact['id']}/revoke", headers=headers
+    )
+    assert revoked.status_code == 200 and revoked.json()["status"] == "revoked"
+
+
+def test_one_driver_cannot_revoke_another_drivers_family_contact(client, people):
+    first = sign_in(client, "+971501110001")
+    contact = client.post(
+        "/app/api/driver/family-contacts", headers=first,
+        json={"name": "Dad", "phone": "+971500000222"},
+    ).json()
+
+    people.create_user("+971501110031", "Driver Four", "driver")
+    second = sign_in(client, "+971501110031")
+    forbidden = client.post(
+        f"/app/api/driver/family-contacts/{contact['id']}/revoke", headers=second
+    )
+    assert forbidden.status_code == 404
+
+
+def test_confirmed_collision_notifies_family_respecting_location_consent(
+    client, app, people, monkeypatch
+):
+    """Synthetic fixture only -- this is a local MockNotificationSender
+    (see notifications.py); no real SMS/push/email was sent or could have
+    been, and this test does not claim otherwise."""
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    headers = sign_in(client, "+971501110001")
+
+    near = client.post(
+        "/app/api/driver/family-contacts", headers=headers,
+        json={"name": "Nearby Contact", "phone": "+971500000333", "share_location": True},
+    ).json()
+    far = client.post(
+        "/app/api/driver/family-contacts", headers=headers,
+        json={"name": "Distant Contact", "phone": "+971500000444", "share_location": False},
+    ).json()
+    client.post("/app/api/family/accept", json={"token": near["invite_token"]})
+    client.post("/app/api/family/accept", json={"token": far["invite_token"]})
+
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+        "gps_latitude": 25.3, "gps_longitude": 55.4,
+    })
+    incident = client.get("/app/api/alerts", headers=headers).json()[0]
+
+    confirmed = client.post(f"/app/api/alerts/{incident['id']}/confirm", headers=headers)
+    assert confirmed.status_code == 200 and confirmed.json()["status"] == "confirmed"
+
+    sent = app.state.notification_sender.sent
+    assert len(sent) == 2
+    by_name = {record["contact_name"]: record["message"] for record in sent}
+    assert "25.3" in by_name["Nearby Contact"]
+    assert "25.3" not in by_name["Distant Contact"]
+
+    # Calling confirm again must not double-notify either contact.
+    client.post(f"/app/api/alerts/{incident['id']}/confirm", headers=headers)
+    assert len(app.state.notification_sender.sent) == 2
+
+    # The driver's own view of who was told, and whether they've acknowledged.
+    notifications = client.get(
+        f"/app/api/alerts/{incident['id']}/family-notifications", headers=headers
+    ).json()
+    assert len(notifications) == 2
+    assert all(n["acknowledged_at"] is None for n in notifications)
+    ack = client.post("/app/api/family/acknowledge", json={"token": notifications[0]["acknowledge_token"]})
+    assert ack.status_code == 200 and ack.json()["status"] == "acknowledged"
+    refreshed = client.get(
+        f"/app/api/alerts/{incident['id']}/family-notifications", headers=headers
+    ).json()
+    assert sum(1 for n in refreshed if n["acknowledged_at"] is not None) == 1
+
+
+def test_accepting_an_invite_does_not_itself_grant_location_access(client, people):
+    """Acceptance is the CONTACT's consent to being notified at all.
+    share_location is the DRIVER's separate, independent choice -- neither
+    side's consent implies the other."""
+    headers = sign_in(client, "+971501110001")
+    contact = client.post(
+        "/app/api/driver/family-contacts", headers=headers,
+        json={"name": "Grandpa", "phone": "+971500000666"},  # share_location omitted -> False
+    ).json()
+    assert contact["share_location"] is False
+
+    accepted = client.post("/app/api/family/accept", json={"token": contact["invite_token"]})
+    assert accepted.status_code == 200
+    # Acceptance alone must not have flipped it.
+    listed = client.get("/app/api/driver/family-contacts", headers=headers).json()[0]
+    assert listed["share_location"] is False
+
+    # Only the driver, explicitly, can turn it on.
+    updated = client.patch(
+        f"/app/api/driver/family-contacts/{contact['id']}", headers=headers,
+        json={"share_location": True},
+    )
+    assert updated.status_code == 200 and updated.json()["share_location"] is True
+    # notify_accidents is configured independently and is untouched by that call.
+    assert updated.json()["notify_accidents"] is True
+
+
+def test_revoked_family_contact_is_not_notified(client, app, people, monkeypatch):
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    headers = sign_in(client, "+971501110001")
+    contact = client.post(
+        "/app/api/driver/family-contacts", headers=headers,
+        json={"name": "Ex Contact", "phone": "+971500000777"},
+    ).json()
+    client.post("/app/api/family/accept", json={"token": contact["invite_token"]})
+    client.post(f"/app/api/driver/family-contacts/{contact['id']}/revoke", headers=headers)
+
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+    })
+    incident = client.get("/app/api/alerts", headers=headers).json()[0]
+    client.post(f"/app/api/alerts/{incident['id']}/confirm", headers=headers)
+    assert app.state.notification_sender.sent == []
+
+
 def test_one_driver_cannot_act_on_another_drivers_alert(client, people):
     first = sign_in(client, "+971501110001")
     started = client.post("/app/api/driver/session/start", headers=first, json={}).json()

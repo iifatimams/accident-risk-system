@@ -482,6 +482,13 @@ public class BackgroundCaptureService:
   public let visionManager = VisionManager()
   // MARK: On-Device Core ML
   private let edgeML = RoadSenseOnDeviceRiskEngine()
+  // MARK: Independent Collision Detection
+  // Deliberately separate from edgeML above -- this must keep running and
+  // reacting even if the risk engine, camera pipeline, or network is
+  // unavailable. See CollisionDetector.swift.
+  private let collisionDetector = CollisionDetector()
+  private let incidentStore = CollisionIncidentStore.shared
+  private var incidentRetryTimer: Timer?
   private var lastSpeedMps: Double?
   private var lastSpeedSource: String?
   private var lastTime: Double = 0.0
@@ -499,6 +506,10 @@ public class BackgroundCaptureService:
   @Published public private(set) var isRunning: Bool = false
   @Published public private(set) var isObdConnected: Bool = false
   @Published public private(set) var isWhoopConnected: Bool = false
+  // A UI can observe this to present an immediate "did you crash?"
+  // confirm/dismiss prompt, independent of polling the server's
+  // pending_collision status.
+  @Published public private(set) var suspectedCollision: CollisionSuspicion?
   public var serverUrl: String = ServerConfig.activeBaseUrl
   private var currentFrame = SensorFrame(streamId: "")
   private var streamTimer: Timer?
@@ -534,6 +545,27 @@ public class BackgroundCaptureService:
       self.isRunning = true
       self.isObdConnected = false
       self.isWhoopConnected = false
+      // Re-present any crash the app never finished showing (e.g. it was
+      // killed right after detection) -- without creating a new detection,
+      // and never for one already confirmed/dismissed.
+      if self.suspectedCollision == nil, let unresolved = self.incidentStore.unresolvedSuspected().last {
+        self.suspectedCollision = CollisionSuspicion(
+          id: unresolved.id, accelMagnitudeMs2: unresolved.accelMagnitudeMs2,
+          score: unresolved.accelMagnitudeMs2 / CollisionDetector.thresholdMs2,
+          onsetEstimate: unresolved.onsetEstimate, modelVersion: unresolved.modelVersion
+        )
+      }
+    }
+    incidentRetryTimer?.invalidate()
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self else {
+        return
+      }
+      self.incidentRetryTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        self?.syncQueue.async {
+          self?.retryPendingIncidents()
+        }
+      }
     }
     // MARK: GPS
     locationManager.delegate = self
@@ -553,6 +585,7 @@ public class BackgroundCaptureService:
           return
         }
         self.syncQueue.async {
+          let now = Date().timeIntervalSince1970
           // User acceleration excludes gravity.
           let ax = m.userAcceleration.x * 9.80665
           let ay = m.userAcceleration.y * 9.80665
@@ -581,6 +614,30 @@ public class BackgroundCaptureService:
           self.currentFrame.gyroMag = sqrt(
             gx * gx + gy * gy + gz * gz
           )
+          // MARK: Independent Collision Detection
+          // Evaluated on every raw motion sample (10Hz), immediately, in
+          // this same callback -- NOT in sendCurrentSnapshot below, which
+          // only runs every 0.3s and is entangled with edgeML.predictRisk.
+          // A real impact must be caught and reacted to even if the risk
+          // engine or the next upload tick never happens.
+          if let suspicion = self.collisionDetector.evaluate(
+            accelMagnitudeMs2: self.currentFrame.accelMag ?? 0.0,
+            at: now
+          ) {
+            // Saved to local storage FIRST, synchronously, before any
+            // network attempt -- the phone must never depend on the server
+            // to preserve this event. Everything downstream (the UI prompt,
+            // the upload, retries) reads from this same stored record.
+            self.incidentStore.record(
+              suspicion, streamId: self.streamId, accelX: totalX, accelY: totalY, accelZ: totalZ
+            )
+            DispatchQueue.main.async {
+              self.suspectedCollision = suspicion
+            }
+            self.reportCollisionImmediately(
+              suspicion, accelX: totalX, accelY: totalY, accelZ: totalZ
+            )
+          }
         }
       }
     }
@@ -796,6 +853,123 @@ public class BackgroundCaptureService:
       ).resume()
     }
   }
+  // MARK: Independent Collision Reporting
+  // Fires immediately on detection, out-of-band from the 0.3s
+  // sendCurrentSnapshot cycle, carrying the EXACT triggering sample -- the
+  // regular upload cadence might decimate past it. Best-effort and never
+  // blocking: the on-device reaction (storing locally, updating
+  // suspectedCollision) already happened synchronously before this is
+  // called. If it fails here (offline, server down), incidentRetryTimer
+  // below will retry it from the local store -- client_incident_id makes a
+  // retry, however late, resolve to the SAME server-side incident rather
+  // than creating a duplicate.
+  private func reportCollisionImmediately(
+    _ suspicion: CollisionSuspicion, accelX: Double, accelY: Double, accelZ: Double
+  ) {
+    uploadIncident(id: suspicion.id, streamId: self.streamId, timestamp: suspicion.onsetEstimate, accelX: accelX, accelY: accelY, accelZ: accelZ)
+  }
+
+  private func uploadIncident(
+    id: String, streamId: String, timestamp: Double, accelX: Double, accelY: Double, accelZ: Double
+  ) {
+    guard let url = URL(string: "\(self.serverUrl)/api/v1/ingest") else {
+      return
+    }
+    let payload: [String: Any] = [
+      "timestamp": timestamp,
+      "stream_id": streamId,
+      "source": "ios",
+      "accel_x": accelX,
+      "accel_y": accelY,
+      "accel_z": accelZ,
+      "client_incident_id": id,
+    ]
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: payload, options: [])
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+      guard let self = self, error == nil,
+        let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+        let data = data,
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let alertId = json["collision_alert_id"] as? Int
+      else {
+        return  // left un-uploaded; the retry timer will try again
+      }
+      self.incidentStore.markUploaded(id: id, serverAlertId: alertId)
+    }.resume()
+  }
+
+  /// Retries anything the local store still has pending: an incident whose
+  /// initial upload failed (offline, server down), and any confirm/dismiss
+  /// decision made locally that the server doesn't know about yet. Runs on
+  /// the SAME 0.3s streamTimer-adjacent cadence used elsewhere in this
+  /// file, not a new high-frequency loop.
+  private func retryPendingIncidents() {
+    for incident in incidentStore.pendingUpload() {
+      uploadIncident(
+        id: incident.id, streamId: incident.streamId, timestamp: incident.onsetEstimate,
+        accelX: incident.accelX, accelY: incident.accelY, accelZ: incident.accelZ
+      )
+    }
+    for incident in incidentStore.pendingDecisionSync() {
+      guard let alertId = incident.serverAlertId else {
+        continue
+      }
+      let action = incident.status == .confirmed ? "confirm" : "dismiss"
+      syncDecision(alertId: alertId, action: action, incidentId: incident.id)
+    }
+  }
+
+  private func syncDecision(alertId: Int, action: String, incidentId: String) {
+    // AuthManager is @MainActor; this method is called from a background
+    // queue, so the token is read via a synchronous hop rather than
+    // referenced directly from this nonisolated context.
+    let token = DispatchQueue.main.sync { AuthManager.shared.token }
+    guard let token = token,
+      let url = URL(string: "\(self.serverUrl)/app/api/alerts/\(alertId)/\(action)")
+    else {
+      return
+    }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+      guard let self = self, error == nil,
+        let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode)
+      else {
+        return  // left un-synced; retried next cycle
+      }
+      self.incidentStore.markDecisionSynced(id: incidentId)
+    }.resume()
+  }
+
+  /// Driver confirms a suspected collision. Updates local storage
+  /// IMMEDIATELY -- this works with zero network connectivity -- and then
+  /// attempts to tell the server; a failure there is retried later, never
+  /// blocking the local confirmation.
+  public func confirmSuspectedCollision(id: String) {
+    incidentStore.confirm(id: id)
+    if suspectedCollision?.id == id {
+      suspectedCollision = nil
+    }
+    if let incident = incidentStore.incident(id: id), let alertId = incident.serverAlertId {
+      syncDecision(alertId: alertId, action: "confirm", incidentId: id)
+    }
+  }
+
+  /// Driver dismisses a false alarm. Same offline-first contract as confirm.
+  public func dismissSuspectedCollision(id: String) {
+    incidentStore.dismiss(id: id)
+    if suspectedCollision?.id == id {
+      suspectedCollision = nil
+    }
+    if let incident = incidentStore.incident(id: id), let alertId = incident.serverAlertId {
+      syncDecision(alertId: alertId, action: "dismiss", incidentId: id)
+    }
+  }
+
   // MARK: Location Updates
   public func locationManager(
     _ manager: CLLocationManager,
@@ -955,6 +1129,8 @@ public class BackgroundCaptureService:
     }
     streamTimer?.invalidate()
     streamTimer = nil
+    incidentRetryTimer?.invalidate()
+    incidentRetryTimer = nil
     locationManager.stopUpdatingLocation()
     motionManager.stopDeviceMotionUpdates()
     obdClient.stop()

@@ -5,6 +5,7 @@ Timestamps are Unix seconds UTC, matching ``SensorFrame.timestamp``.
 
 from __future__ import annotations
 import json
+import secrets
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -18,7 +19,25 @@ ROLE_RANK: dict[str, int] = {"driver": 0, "account_manager": 1, "administrator":
 DEVICE_KINDS: tuple[str, ...] = ("adapter", "wearable")
 DEVICE_STATUSES: tuple[str, ...] = ("active", "spare", "out_of_service")
 ALERT_KINDS: tuple[str, ...] = ("high_risk", "collision")
-ALERT_STATUSES: tuple[str, ...] = ("pending", "confirmed", "cancelled")
+# "pending"/"confirmed"/"cancelled" remain exactly as before for high_risk
+# alerts and the existing manual /driver/collision report. An automatically
+# DETECTED collision (collision_detector.py) instead uses the richer
+# lifecycle: suspected -> awaiting_confirmation -> {confirmed, dismissed,
+# unconfirmed_timeout} -> resolved. Both vocabularies coexist in this same
+# table/kind so a dashboard can list all collision-kind alerts together.
+ALERT_STATUSES: tuple[str, ...] = (
+    "pending", "confirmed", "cancelled",
+    "suspected", "awaiting_confirmation", "dismissed", "unconfirmed_timeout", "resolved",
+)
+INCIDENT_LIFECYCLE: dict[str, tuple[str, ...]] = {
+    "suspected": ("awaiting_confirmation",),
+    "awaiting_confirmation": ("confirmed", "dismissed", "unconfirmed_timeout"),
+    "confirmed": ("resolved",),
+    "dismissed": ("resolved",),
+    "unconfirmed_timeout": ("resolved",),
+    "resolved": (),
+}
+FAMILY_CONTACT_STATUSES: tuple[str, ...] = ("invited", "accepted", "revoked")
 
 DEFAULT_SETTINGS: dict[str, float] = {
     "risk_medium_threshold": 0.40,
@@ -120,9 +139,50 @@ CREATE TABLE IF NOT EXISTS alerts (
     latitude      REAL,
     longitude     REAL,
     acknowledged_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    acknowledged_at REAL
+    acknowledged_at REAL,
+    -- Independent collision-detection lifecycle fields (model_version,
+    -- onset_estimate, detection_score, source: "automatic_detector" or
+    -- "manual_report"). Kept here, not a separate table, since every
+    -- collision incident already IS an alert row with kind='collision';
+    -- JSON so new fields never need a migration.
+    detail_json   TEXT    NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
+
+-- Consent-based family monitoring. A contact is NOT a users() row -- they
+-- never log in; invite_token (shared by the driver out-of-band, there is no
+-- bundled SMS/email provider) is their only credential, used once to
+-- accept and thereafter to acknowledge notifications. Independent of
+-- research_consent above -- accepting a family invite never implies
+-- research consent, and vice versa.
+CREATE TABLE IF NOT EXISTS family_contacts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    driver_user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name             TEXT    NOT NULL,
+    phone            TEXT    NOT NULL,
+    relationship     TEXT    NOT NULL DEFAULT '',
+    status           TEXT    NOT NULL DEFAULT 'invited',
+    notify_accidents INTEGER NOT NULL DEFAULT 1,
+    share_location   INTEGER NOT NULL DEFAULT 0,
+    invite_token     TEXT    NOT NULL UNIQUE,
+    created_at       REAL    NOT NULL,
+    responded_at     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_family_contacts_driver ON family_contacts(driver_user_id);
+
+-- UNIQUE(alert_id, contact_id) gives duplicate-notification suppression for
+-- free: a second attempt to notify the same contact about the same incident
+-- is simply ignored at insert time, not re-sent.
+CREATE TABLE IF NOT EXISTS family_notifications (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id           INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+    contact_id         INTEGER NOT NULL REFERENCES family_contacts(id) ON DELETE CASCADE,
+    sent_at            REAL    NOT NULL,
+    delivery_status    TEXT    NOT NULL,
+    acknowledge_token  TEXT    NOT NULL UNIQUE,
+    acknowledged_at    REAL,
+    UNIQUE(alert_id, contact_id)
+);
 
 CREATE TABLE IF NOT EXISTS settings (
     key           TEXT PRIMARY KEY,
@@ -506,10 +566,17 @@ class Database:
 
     # --------------------------------------------------------------- alerts
 
+    def get_alert(self, alert_id: int) -> dict[str, Any] | None:
+        """Fetch one alert's current (possibly since-updated) state."""
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+            return self._decode_alert(dict(row)) if row else None
+
     def create_alert(
         self, user_id: int, kind: str, *, session_id: int | None = None,
         risk_index: float | None = None, latitude: float | None = None,
         longitude: float | None = None, status: str = "pending",
+        detail: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record a high-risk or collision alert (FR9, FR11)."""
         if kind not in ALERT_KINDS:
@@ -520,24 +587,66 @@ class Database:
         with self.connect() as connection:
             cursor = connection.execute(
                 "INSERT INTO alerts(session_id, user_id, kind, status, created_at, risk_index, "
-                "latitude, longitude) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (session_id, user_id, kind, status, time.time(), risk_index, latitude, longitude),
+                "latitude, longitude, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id, user_id, kind, status, time.time(), risk_index, latitude, longitude,
+                    json.dumps(detail or {}, separators=(",", ":")),
+                ),
             )
-            return self._row(connection, "alerts", int(cursor.lastrowid))
+            return self._decode_alert(self._row(connection, "alerts", int(cursor.lastrowid)))
 
     def set_alert_status(
-        self, alert_id: int, status: str, acknowledged_by: int | None = None
+        self, alert_id: int, status: str, acknowledged_by: int | None = None,
+        *, enforce_lifecycle: bool = False,
     ) -> dict[str, Any] | None:
-        """Confirm or cancel an alert, recording who acted on it."""
+        """Confirm, cancel, dismiss, time out, or resolve an alert.
+
+        enforce_lifecycle=True rejects a transition not listed in
+        INCIDENT_LIFECYCLE for the alert's current status -- used for the
+        richer automatic-detector states; the legacy pending/confirmed/
+        cancelled path (high_risk alerts, manual collision reports) leaves
+        this off, unchanged from before.
+        """
         if status not in ALERT_STATUSES:
             raise ValueError(f"Unknown alert status: {status}")
         with self.connect() as connection:
+            if enforce_lifecycle:
+                current = connection.execute(
+                    "SELECT status FROM alerts WHERE id = ?", (alert_id,)
+                ).fetchone()
+                if current is None:
+                    return None
+                allowed = INCIDENT_LIFECYCLE.get(current["status"], ())
+                if status not in allowed:
+                    raise ValueError(f"Cannot move {current['status']!r} -> {status!r}")
             connection.execute(
                 "UPDATE alerts SET status = ?, acknowledged_by = ?, acknowledged_at = ? "
                 "WHERE id = ?",
                 (status, acknowledged_by, time.time() if acknowledged_by else None, alert_id),
             )
-            return self._row(connection, "alerts", alert_id)
+            row = connection.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+            return self._decode_alert(dict(row)) if row else None
+
+    def timeout_unconfirmed_incidents(self, older_than_seconds: float) -> list[dict[str, Any]]:
+        """Move any awaiting_confirmation collision incident older than the
+        window to unconfirmed_timeout. Call-on-access, same pattern as
+        SessionRecorder.stale_streams -- no background scheduler needed."""
+        cutoff = time.time() - older_than_seconds
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM alerts WHERE status = 'awaiting_confirmation' AND created_at < ?",
+                (cutoff,),
+            ).fetchall()
+            timed_out = []
+            for row in rows:
+                connection.execute(
+                    "UPDATE alerts SET status = 'unconfirmed_timeout' WHERE id = ?", (row["id"],)
+                )
+                updated = connection.execute(
+                    "SELECT * FROM alerts WHERE id = ?", (row["id"],)
+                ).fetchone()
+                timed_out.append(self._decode_alert(dict(updated)))
+            return timed_out
 
     def list_alerts(
         self, *, user_id: int | None = None, kind: str | None = None, limit: int = 100
@@ -553,15 +662,182 @@ class Database:
         if kind is not None:
             clauses.append("a.kind = ?")
             params.append(kind)
-            
+
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
-            
+
         query += " ORDER BY a.created_at DESC LIMIT ?"
         params.append(limit)
-        
+
         with self.connect() as connection:
-            return [dict(r) for r in connection.execute(query, params)]
+            return [self._decode_alert(dict(r)) for r in connection.execute(query, params)]
+
+    # ------------------------------------------------------- family contacts
+
+    def invite_family_contact(
+        self, driver_user_id: int, name: str, phone: str, *,
+        relationship: str = "", notify_accidents: bool = True, share_location: bool = False,
+    ) -> dict[str, Any]:
+        """Create a pending invitation. The invite_token is the contact's
+        only credential (they never log in) -- the driver must relay it
+        out-of-band (text/call them), there is no bundled SMS/email
+        provider. Returning it here is handing the CREATOR their own new
+        resource's token, not leaking anyone else's credential."""
+        token = secrets.token_urlsafe(24)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO family_contacts(driver_user_id, name, phone, relationship, "
+                "status, notify_accidents, share_location, invite_token, created_at) "
+                "VALUES (?, ?, ?, ?, 'invited', ?, ?, ?, ?)",
+                (
+                    driver_user_id, name.strip(), phone.strip(), relationship.strip(),
+                    int(notify_accidents), int(share_location), token, time.time(),
+                ),
+            )
+            return self._decode_family_contact(self._row(connection, "family_contacts", int(cursor.lastrowid)))
+
+    def accept_family_contact(self, invite_token: str) -> dict[str, Any] | None:
+        """The contact's one consent action. Only a pending invitation can
+        be accepted -- an already-revoked or already-accepted token is
+        inert, not reusable to re-authorize anything."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM family_contacts WHERE invite_token = ? AND status = 'invited'",
+                (invite_token,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE family_contacts SET status = 'accepted', responded_at = ? WHERE id = ?",
+                (time.time(), row["id"]),
+            )
+            return self._decode_family_contact(self._row(connection, "family_contacts", row["id"]))
+
+    def revoke_family_contact(self, contact_id: int, driver_user_id: int) -> dict[str, Any] | None:
+        """Only the owning driver can revoke -- checked here, not just at
+        the route layer, so a direct call can't bypass ownership."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM family_contacts WHERE id = ? AND driver_user_id = ?",
+                (contact_id, driver_user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE family_contacts SET status = 'revoked', responded_at = ? WHERE id = ?",
+                (time.time(), contact_id),
+            )
+            return self._decode_family_contact(self._row(connection, "family_contacts", contact_id))
+
+    def update_family_contact_permissions(
+        self, contact_id: int, driver_user_id: int, *,
+        notify_accidents: bool | None = None, share_location: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """The DRIVER configures these -- independently of each other, and
+        independently of whether the contact has accepted yet. Accepting an
+        invite is the contact's OWN consent to being contacted at all; it
+        never grants location access by itself, since share_location is a
+        separate column the driver controls here, defaulting to False."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM family_contacts WHERE id = ? AND driver_user_id = ?",
+                (contact_id, driver_user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            updates: dict[str, int] = {}
+            if notify_accidents is not None:
+                updates["notify_accidents"] = int(notify_accidents)
+            if share_location is not None:
+                updates["share_location"] = int(share_location)
+            if updates:
+                assignments = ", ".join(f"{key} = ?" for key in updates)
+                connection.execute(
+                    f"UPDATE family_contacts SET {assignments} WHERE id = ?",
+                    (*updates.values(), contact_id),
+                )
+            return self._decode_family_contact(self._row(connection, "family_contacts", contact_id))
+
+    def list_family_contacts(self, driver_user_id: int) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM family_contacts WHERE driver_user_id = ? ORDER BY created_at DESC",
+                (driver_user_id,),
+            )
+            return [self._decode_family_contact(dict(r)) for r in rows]
+
+    def accepted_notifiable_contacts(self, driver_user_id: int) -> list[dict[str, Any]]:
+        """Contacts eligible for an accident notification right now:
+        accepted (not merely invited, never revoked) AND opted into
+        accident notifications specifically -- share_location is a
+        SEPARATE permission, checked by the caller when building the
+        message, not a gate on whether to notify at all."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM family_contacts WHERE driver_user_id = ? "
+                "AND status = 'accepted' AND notify_accidents = 1",
+                (driver_user_id,),
+            )
+            return [self._decode_family_contact(dict(r)) for r in rows]
+
+    def already_notified(self, alert_id: int, contact_id: int) -> bool:
+        """Check BEFORE sending, not just before recording -- otherwise a
+        real provider would double-send even though the database would
+        only ever keep one row (the UNIQUE constraint stops the duplicate
+        RECORD, not a duplicate real-world message already sent before
+        that record was attempted)."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM family_notifications WHERE alert_id = ? AND contact_id = ?",
+                (alert_id, contact_id),
+            ).fetchone()
+            return row is not None
+
+    def record_family_notification(
+        self, alert_id: int, contact_id: int, delivery_status: str
+    ) -> dict[str, Any] | None:
+        """Returns None if this (alert, contact) pair was already notified
+        -- the UNIQUE constraint makes duplicate suppression automatic, not
+        something the caller has to remember to check first."""
+        token = secrets.token_urlsafe(24)
+        with self.connect() as connection:
+            try:
+                cursor = connection.execute(
+                    "INSERT INTO family_notifications"
+                    "(alert_id, contact_id, sent_at, delivery_status, acknowledge_token) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (alert_id, contact_id, time.time(), delivery_status, token),
+                )
+            except sqlite3.IntegrityError:
+                return None
+            return self._row(connection, "family_notifications", int(cursor.lastrowid))
+
+    def acknowledge_family_notification(self, acknowledge_token: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM family_notifications WHERE acknowledge_token = ?",
+                (acknowledge_token,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE family_notifications SET acknowledged_at = ? WHERE id = ?",
+                (time.time(), row["id"]),
+            )
+            return self._row(connection, "family_notifications", row["id"])
+
+    def list_family_notifications(self, alert_id: int) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM family_notifications WHERE alert_id = ? ORDER BY sent_at", (alert_id,)
+            )
+            return [dict(r) for r in rows]
+
+    @staticmethod
+    def _decode_family_contact(row: dict[str, Any]) -> dict[str, Any]:
+        row["notify_accidents"] = bool(row["notify_accidents"])
+        row["share_location"] = bool(row["share_location"])
+        return row
 
     # ------------------------------------------------------------- settings
 
@@ -634,6 +910,16 @@ class Database:
             row["summary"] = json.loads(row.get("summary") or "{}")
         except json.JSONDecodeError:
             row["summary"] = {}
+        return row
+
+    @staticmethod
+    def _decode_alert(row: dict[str, Any]) -> dict[str, Any]:
+        """Expand the stored detail JSON (model_version, onset_estimate,
+        detection_score, source, ...) into a dictionary."""
+        try:
+            row["detail"] = json.loads(row.get("detail_json") or "{}")
+        except json.JSONDecodeError:
+            row["detail"] = {}
         return row
 
 

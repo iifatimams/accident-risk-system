@@ -13,6 +13,7 @@ from threading import RLock
 from typing import Any
 
 from accident_risk.api.db import Database
+from accident_risk.processing import collision_detector
 from accident_risk.schemas import PredictionResult, SensorFrame
 
 LOGGER = logging.getLogger("accident_risk")
@@ -22,6 +23,15 @@ LOGGER = logging.getLogger("accident_risk")
 POINT_INTERVAL_SECONDS = 1.0
 # Do not raise a second high-risk alert for the same driver inside this window.
 ALERT_COOLDOWN_SECONDS = 60.0
+# Do not flag a second automatic collision incident for the same stream
+# inside this window -- the duplicate-suppression the roadmap asks for.
+# Deliberately longer than ALERT_COOLDOWN_SECONDS: a real impact's kinematic
+# signature can keep exceeding the threshold for several seconds (rollover,
+# secondary impact, airbag deployment), and that must stay ONE incident.
+COLLISION_DETECTION_COOLDOWN_SECONDS = 120.0
+# An incident nobody confirms or dismisses within this window times out
+# rather than sitting open forever.
+UNCONFIRMED_TIMEOUT_SECONDS = 180.0
 
 
 class SessionRecorder:
@@ -34,6 +44,13 @@ class SessionRecorder:
         self._last_point: dict[str, float] = {}
         self._last_alert: dict[str, float] = {}
         self._last_seen: dict[str, float] = {}
+        self._last_collision_detection: dict[str, float] = {}
+        # client_incident_id -> alert_id. Deliberately NOT cleared on
+        # register/release: a client_incident_id is a globally-unique UUID
+        # generated once by the on-device detector, so a retry arriving
+        # after the stream was re-registered (e.g. app relaunch) must still
+        # be recognized as the same incident.
+        self._incident_ids_seen: dict[str, int] = {}
 
     def register(self, stream_id: str, session_id: int) -> None:
         """Begin recording frames for a stream."""
@@ -42,17 +59,100 @@ class SessionRecorder:
             self._last_point.pop(stream_id, None)
             self._last_alert.pop(stream_id, None)
             self._last_seen.pop(stream_id, None)
+            self._last_collision_detection.pop(stream_id, None)
 
     def release(self, stream_id: str) -> None:
         """Stop recording frames for a stream."""
         with self._lock:
-            for store in (self._sessions, self._last_point, self._last_alert, self._last_seen):
+            for store in (
+                self._sessions, self._last_point, self._last_alert,
+                self._last_seen, self._last_collision_detection,
+            ):
                 store.pop(stream_id, None)
 
     def session_for(self, stream_id: str) -> int | None:
         """Return the open session recording this stream, if any."""
         with self._lock:
             return self._sessions.get(stream_id)
+
+    def check_collision(self, frame: SensorFrame) -> dict[str, Any] | None:
+        """Independent collision detection: runs on this frame's raw
+        accelerometer data ONLY -- never reads a PredictionResult, risk
+        score, or anything from the (separate, still-unvalidated)
+        future-risk research. Call this unconditionally for every frame,
+        regardless of whether a prediction exists yet for this stream.
+        Never raises into ingestion, same principle as observe()."""
+        try:
+            return self._check_collision(frame)
+        except Exception:  # noqa: BLE001 - detection must never break ingestion
+            LOGGER.exception("collision_detector_failed", extra={"context": {"stream": frame.stream_id}})
+            return None
+
+    def _check_collision(self, frame: SensorFrame) -> dict[str, Any] | None:
+        """Returns the new/escalated/matched incident dict, else None (no
+        trigger, no active session, or suppressed as a duplicate).
+
+        client_incident_id (when present, from the on-device detector) is
+        the PRIMARY dedup key: a retried or offline-queued re-upload of the
+        exact same detected event is recognized and returns the EXISTING
+        alert's current state (which may have moved on from
+        awaiting_confirmation by now), never creating a second one,
+        regardless of how much time has passed. The time-window cooldown
+        below remains as a fallback for frames with no id (legacy/non-iOS
+        sources) and as defense in depth.
+        """
+        suspicion = collision_detector.check(frame)
+        if suspicion is None or not suspicion.triggered:
+            return None
+
+        if frame.client_incident_id is not None:
+            with self._lock:
+                known_alert_id = self._incident_ids_seen.get(frame.client_incident_id)
+            if known_alert_id is not None:
+                return self.db.get_alert(known_alert_id)
+
+        with self._lock:
+            session_id = self._sessions.get(frame.stream_id)
+            if session_id is None:
+                return None
+            now = frame.timestamp
+            suppressed = (
+                frame.client_incident_id is None
+                and now - self._last_collision_detection.get(frame.stream_id, 0.0)
+                < COLLISION_DETECTION_COOLDOWN_SECONDS
+            )
+            if suppressed:
+                return None
+            self._last_collision_detection[frame.stream_id] = now
+
+        session = self.db.get_session(session_id)
+        if session is None:
+            return None
+
+        detail = {
+            "source": "automatic_detector",
+            "model_version": suspicion.model_version,
+            "onset_estimate": suspicion.onset_estimate,
+            "detection_score": suspicion.score,
+            "accel_magnitude_ms2": suspicion.accel_magnitude_ms2,
+        }
+        if frame.client_incident_id is not None:
+            detail["client_incident_id"] = frame.client_incident_id
+        incident = self.db.create_alert(
+            session["user_id"], "collision", session_id=session_id,
+            latitude=frame.gps_latitude, longitude=frame.gps_longitude,
+            status="suspected", detail=detail,
+        )
+        if frame.client_incident_id is not None:
+            with self._lock:
+                self._incident_ids_seen[frame.client_incident_id] = incident["id"]
+        # Immediately promote suspected -> awaiting_confirmation: the driver
+        # is now being asked. Kept as two steps (not created directly in the
+        # later state) so the lifecycle transition itself is exercised and
+        # audited, not merely asserted.
+        return self.db.set_alert_status(
+            incident["id"], "awaiting_confirmation", enforce_lifecycle=True
+        )
 
     def observe(
         self,
@@ -240,6 +340,7 @@ class SessionRecorder:
             latitude=latitude,
             longitude=longitude,
             status="pending",
+            detail={"source": "manual_report"},
         )
 
     def summarise(self, session_id: int) -> dict[str, Any]:

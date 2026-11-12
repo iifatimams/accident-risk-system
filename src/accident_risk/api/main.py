@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from accident_risk.api.auth import AuthService
 from accident_risk.api.db import Database
+from accident_risk.api.notifications import MockNotificationSender
 from accident_risk.api.recorder import SessionRecorder
 from accident_risk.api.routes_app import create_router, risk_level_for
 from accident_risk.inference.engine import InferenceEngine
@@ -127,12 +128,19 @@ def create_app(
     )
     recorder = SessionRecorder(database)
     bootstrap_administrator(database, env)
+    notification_sender = MockNotificationSender()
 
     application.state.db = database
     application.state.auth = auth
     application.state.recorder = recorder
+    application.state.notification_sender = notification_sender
 
-    application.include_router(create_router(database, auth, recorder, engine, edge_state=ui_state))
+    application.include_router(
+        create_router(
+            database, auth, recorder, engine,
+            edge_state=ui_state, notification_sender=notification_sender,
+        )
+    )
 
     @application.get("/", include_in_schema=False)
     @application.get("/app", include_in_schema=False)
@@ -152,7 +160,7 @@ def create_app(
 
         try:
             result = None
-            
+
             if frame.source != "ml_runner":
                 if frame.gps_latitude is not None and frame.gps_longitude is not None:
                     try:
@@ -325,15 +333,27 @@ def create_app(
                     gyro_x=body.get("gyro_x"),
                     gyro_y=body.get("gyro_y"),
                     gyro_z=body.get("gyro_z"),
+                    client_incident_id=body.get("client_incident_id"),
                 )
             except (ValidationError, ValueError, TypeError) as exc:
                 raise HTTPException(422, f"Invalid sensor frame: {exc}") from exc
 
+            # Independent collision detection: runs on this frame's raw
+            # accelerometer data alone, before and regardless of the
+            # prediction/edge_mode/direct_risk branching inside
+            # ingest_frame, so it is never gated by (or dependent on) the
+            # future-risk score. Called here (not inside ingest_frame) so
+            # its result -- the collision alert, if one was created or
+            # matched by client_incident_id -- can be returned to the
+            # caller, letting an offline-queued client learn the server-
+            # side alert id once its upload finally succeeds.
+            collision_alert = recorder.check_collision(frame)
             prediction = ingest_frame(frame, direct_risk=direct_risk, edge_mode=edge_mode)
             return {
                 "status": "ok",
                 "stream_id": stream_id,
                 "risk_index": prediction.overall_risk_index if prediction else direct_risk,
+                "collision_alert_id": collision_alert["id"] if collision_alert else None,
             }
 
     @application.post("/session/stop")
