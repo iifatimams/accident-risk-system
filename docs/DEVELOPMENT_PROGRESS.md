@@ -311,6 +311,62 @@ Verification: the benchmark script itself ran to completion with real
 data (see results doc); `.venv/bin/python -m pytest -q`: still **164
 passed** (unaffected -- this work didn't touch any tested code path).
 
+## Phase 3 -- DMD driver-attention model: audit + first real baseline run
+
+### 3.1 Audit of actual local DMD data
+
+Read-only audit, no files modified. `data/raw/dmd/` holds 108GB across
+three annotation types (drowsiness 13GB/13 sessions, gaze 19GB/14
+sessions, distraction 77GB/14 sessions), each a real participant/session
+with an ASAM OpenLABEL JSON of genuine per-frame labels -- confirmed by
+reading actual annotation files, not assumed. `data/interim/dmd_frames/`
+was empty and no prior checkpoint/evaluation output existed anywhere
+before this session, despite `scripts/extract_dmd_frames.py` and
+`scripts/train_driver_state_baseline.py` already existing (same pattern as
+the BDD100K scripts: written, never actually run here -- both had
+hardcoded `/tmp/dmd_audit/...` paths from whatever machine last ran them).
+
+**Real label taxonomies confirmed present**: drowsiness
+(`eyes_state`/`blinks`/`yawning`), distraction (`gaze_on_road` binary,
+`talking`, `hands_using_wheel`, `driver_actions` incl. `radio`/`drinking`/
+`reach_side`/`talking_to_passenger`), gaze (`gaze_zone` 9-way incl.
+mirrors/infotainment/steering_wheel). **No `phone_use` or `looking_up`/
+`looking_down` label exists anywhere in this data** -- confirmed by
+reading the actual JSONs. Per AGENTS.md and the directive, nothing in this
+project should claim training/validation against those labels from DMD.
+
+### 3.2/3.3 First real baseline run
+
+Fixed both scripts' hardcoded `/tmp` paths to the repo's own `data/raw`/
+`data/interim` (matching the BDD100K fix pattern). Extracted only the one
+needed video+annotation pair (416MB) from the `gC-14` distraction archive
+(not the full 108GB corpus), then ran the existing extraction + MobileNetV3
+baseline exactly as already designed.
+
+Full results, methodology, and honest caveats:
+[docs/benchmarks/dmd_driver_state_baseline_v1.md](benchmarks/dmd_driver_state_baseline_v1.md).
+
+Headline: single-session held-out accuracy 85.1% (not_looking_road recall
+0.896, precision 0.551 -- over-predicts distraction, the safer failure
+direction but a real measured weakness). The causal majority-vote
+smoothing evidence-gate test made results WORSE (75.0% accuracy), a real
+negative result: naive temporal smoothing should not be assumed to help
+without testing it, at least not on this single short session.
+
+What's NOT done:
+
+- Multi-driver/multi-session training (this is one driver, one ~4-minute
+  session) -- 87 more DMD archives (~104GB) remain unextracted.
+- Any comparison against the existing Apple Vision rule-based system from
+  Phase 2 (Phase 3.3's actual ask) -- needs DMD video through an
+  iOS-equivalent Vision pipeline, not attempted.
+- Core ML export / on-device benchmark (Phase 3.4).
+- drowsiness and gaze annotation types were audited (taxonomy confirmed)
+  but no baseline was trained on them this session.
+
+Verification: scripts ran to completion with real data (see results doc);
+`.venv/bin/python -m pytest -q`: still **164 passed** (unaffected).
+
 ## Phases 5-19
 
 Not started.

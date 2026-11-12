@@ -19,15 +19,11 @@ from pathlib import Path
 
 import cv2
 
-VIDEO_PATH = Path(
-    "/tmp/dmd_audit/distraction/dmd/gC/14/s1/"
-    "gC_14_s1_2019-03-04T11;56;20+01;00_rgb_face.mp4"
-)
-ANNOTATION_PATH = Path(
-    "/tmp/dmd_audit/distraction/dmd/gC/14/s1/"
-    "gC_14_s1_2019-03-04T11;56;20+01;00_rgb_ann_distraction.json"
-)
-OUT_ROOT = Path("/tmp/dmd_audit/driver_state_dataset")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SESSION_DIR = REPO_ROOT / "data/interim/dmd_frames/gC_14_s1"
+VIDEO_PATH = SESSION_DIR / "gC_14_s1_2019-03-04T11;56;20+01;00_rgb_face.mp4"
+ANNOTATION_PATH = SESSION_DIR / "gC_14_s1_2019-03-04T11;56;20+01;00_rgb_ann_distraction.json"
+OUT_ROOT = REPO_ROOT / "data/interim/dmd_frames/driver_state_dataset"
 
 SAMPLE_STRIDE = 5  # keep every 5th frame -> ~1336 frames instead of 6681
 VAL_FRACTION = 0.2  # last 20% of session time -> val (causal split, no shuffle)
