@@ -25,6 +25,7 @@ Known, stated limitations:
 
 import json
 from pathlib import Path
+from time import perf_counter
 
 import torch
 from PIL import Image
@@ -93,8 +94,13 @@ def main() -> None:
     stats = {name: {"tp": 0, "fp": 0, "fn": 0} for name in set(COCO_TO_BDD.values())}
     taxonomy_gap_gt_counts: dict[str, int] = {}
     n_images = 0
+    latencies_ms: list[float] = []
 
     with torch.no_grad():
+        # Untimed warmup: MPS/CUDA JIT-compiles kernels on first use, which
+        # would otherwise show up as a multi-second outlier in the per-image
+        # latency numbers below.
+        model([to_tensor(Image.open(image_paths[0]).convert("RGB")).to(device)])
         for img_path in image_paths:
             label_path = LABELS_DIR / (img_path.stem + ".json")
             if not label_path.exists():
@@ -104,7 +110,9 @@ def main() -> None:
 
             image = Image.open(img_path).convert("RGB")
             tensor = to_tensor(image).to(device)
+            start = perf_counter()
             output = model([tensor])[0]
+            latencies_ms.append((perf_counter() - start) * 1000)
 
             preds = []
             for score, label_idx, box in zip(
@@ -156,6 +164,12 @@ def main() -> None:
     print(" here they are isolated out as a genuine taxonomy gap, not a detector failure)")
     for cat, count in sorted(taxonomy_gap_gt_counts.items(), key=lambda kv: -kv[1]):
         print(f"  {cat:<20} {count} ground-truth boxes in this sample")
+
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"\n=== Model footprint (this Mac, device={device}, batch size 1) ===")
+    print(f"parameters: {n_params:,}")
+    print(f"mean inference latency: {sum(latencies_ms) / len(latencies_ms):.1f} ms/image")
+    print(f"max inference latency: {max(latencies_ms):.1f} ms/image")
 
 
 if __name__ == "__main__":
