@@ -1,12 +1,9 @@
 """Multi-stream ingestion API; handles per-driver telemetry and dashboard feeds."""
-import json
 import logging
 import math
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
-from threading import RLock, Thread
+from threading import RLock
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -26,8 +23,6 @@ from accident_risk.processing.map_context import MapContextResolver
 from accident_risk.schemas import SENSOR_FIELDS, PredictionResult, SensorFrame
 from accident_risk.settings import EnvironmentSettings, PipelineSettings, load_config
 from accident_risk.sources.live_buffer import LiveBuffer
-
-TERMINAL_RUNNER_URL = "http://127.0.0.1:8003"
 
 # Kept for compatibility with code that imports this name; each app instance
 # uses its own cache so tests and app factories never share driver state.
@@ -66,23 +61,6 @@ def parse_risk(body: dict) -> float | None:
             raise HTTPException(422, f"{key} is outside its expected range")
         return number
     return None
-
-
-def async_mirror_to_terminal(payload: dict) -> None:
-    """Relays incoming phone frames to run_advanced_terminal on port 8003."""
-    def send():
-        try:
-            req = urllib.request.Request(
-                TERMINAL_RUNNER_URL,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=0.5):
-                pass
-        except (OSError, ValueError, urllib.error.URLError) as exc:
-            logging.getLogger("accident_risk").debug("Terminal mirror unavailable: %s", exc)
-    Thread(target=send, daemon=True).start()
 
 
 class Batch(BaseModel):
@@ -283,11 +261,6 @@ def create_app(
                     "pedestrian_count": body.get("pedestrian_count", 0),
                     "lead_closing_fast": body.get("lead_closing_fast", False),
                 })
-
-            # An iPhone running Core ML has no use for a Python prediction
-            # round trip. Preserve mirroring only for older, non-edge clients.
-            if source_tag not in LEGACY_RUNNER_SOURCES and not edge_mode:
-                async_mirror_to_terminal(body)
 
             obd_connected = optional_value(body, "is_obd_connected", "obd_connected")
             vehicle_speed = optional_value(body, "vehicle_speed", "speed")
