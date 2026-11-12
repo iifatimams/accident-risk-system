@@ -900,6 +900,56 @@ server + browser inspection, cleaned up afterward). `node --check`
 confirms the file is syntactically valid JS. No Android, `data/raw`, or
 real-database changes -- the preview server used a temp sqlite file.
 
-## Phases 11-19 (except 16, above)
+## Phase 12 -- Independent post-impact collision detection: one real bug fixed
 
-Not started.
+Audited `CollisionDetector.swift`, `CollisionIncidentStore.swift`, and the
+sync-retry path in `BackgroundCaptureService.syncDecision` against Phase
+12's checklist. Most of it (IMU sampling, gravity handling, alert
+cooldown, local-first persistence, offline-safe storage) was already
+solid, previously audited at the 2026-11-12 checkpoint or fixed this
+session (checkpoint resume #1-#4).
+
+**Found and fixed a new, real bug**: `syncDecision`'s retry logic treated
+EVERY non-2xx response identically -- "left un-synced, retried next
+cycle" -- with no way to tell a transient failure (offline, server down)
+apart from a PERMANENT rejection (HTTP 409: an invalid lifecycle
+transition). This session's own checkpoint #4 fix made the server
+correctly reject confirm/dismiss on an already-resolved/dismissed
+automatic incident -- which means, as a direct consequence, the retry
+timer (`incidentRetryTimer`, every 10s) would now retry that exact
+rejected request FOREVER, for the rest of the app session, since nothing
+ever marked it done. Added `StoredIncident.syncRejected` (a NEW field,
+deliberately `Bool?` not `Bool` -- Codable does not honor a stored
+property's default value for a key that's simply absent, so a plain
+non-optional field would have made every incident saved by an older app
+version fail to decode at all, silently dropping them). `syncDecision`
+now calls `markDecisionRejected` on a 409 instead of leaving it to retry
+forever; `pendingDecisionSync()` excludes rejected incidents.
+
+Also discovered, while adding tests for this fix, that
+`CollisionDetector.swift` and `CollisionIncidentStore.swift` were both
+unnecessarily excluded from the `swift test`-able module -- both import
+only `Foundation`, no real reason they couldn't be tested on macOS (same
+mistake Phase 1 found and fixed for other files). Un-excluded them.
+
+5 new Swift tests, including one that pins down the exact
+backward-compatibility hazard described above (decoding a pre-existing
+incident JSON with no `syncRejected` key must still succeed).
+
+What's NOT done: "handling phone drops/bumps" specifically (a single-
+sample acceleration-magnitude threshold cannot currently distinguish a
+dropped phone from a real vehicle impact) was investigated but NOT
+fixed -- any discriminating heuristic here needs real labeled data to
+validate against (a phone-drop signature vs. a real crash signature),
+which doesn't exist in this environment; adding an unvalidated one risks
+reducing real-collision recall, which is worse than leaving the known
+limitation honestly documented (already was, in that file's own
+docstring).
+
+Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **90
+passed** (5 new). `pytest`: **177 passed** (unaffected -- this was an
+iOS-only fix). No Android, `data/raw`, or real-database changes.
+
+## Phases 11, 13-15, 18-19
+
+Not started. (Phases 16 and 17 are done, see their own sections above.)

@@ -44,8 +44,12 @@ let package = Package(
                 "Models/VZCrashModel.mlpackage",
                 "Models/SensorFrame.swift",
                 "Services/BackgroundCaptureService.swift",
-                "Services/CollisionDetector.swift",
-                "Services/CollisionIncidentStore.swift",
+                // CollisionDetector.swift and CollisionIncidentStore.swift
+                // were excluded here too, but both import only Foundation
+                // (no UIKit/AVFoundation/CoreML) -- there was never a real
+                // reason they couldn't be tested on macOS. Included so
+                // StoredIncident's sync-rejection logic (this session's fix
+                // for an infinite-retry bug) is actually unit tested.
                 "Services/ContextManager.swift",
                 "Services/ObdBleClient.swift",
                 "Services/RoadSenseOnDeviceRiskEngine.swift",
