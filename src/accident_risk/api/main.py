@@ -104,6 +104,15 @@ def create_app(
     application = FastAPI(title="RoadSense Multi-Driver API", version="0.2.0")
     buffer = LiveBuffer()
     lock = RLock()
+    # Phase 10 audit note: this resolver's design_speed/radar_threshold/
+    # road_name getters are NOT the authoritative live road context --
+    # they are unused here. The on-device risk model's actual designSpeed
+    # feature comes from the iOS-side ContextManager.swift, a separate
+    # implementation that queries Overpass directly from the phone (see
+    # RoadContext.swift for its tested logic and a real bug fixed there:
+    # its design_speed fallback didn't match train_polidriving.py's
+    # missing-value convention). Only is_in_roundabout() below is actually
+    # consumed, to annotate frame.is_roundabout server-side.
     map_resolver = MapContextResolver()
     # State is keyed by the same stream_id as the iOS app's SensorFrame.
     ui_state: dict[str, dict] = {}
