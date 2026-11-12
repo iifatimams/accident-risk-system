@@ -98,8 +98,6 @@ accident-risk-system/
 ├── AGENTS.md
 ├── README.md
 ├── pyproject.toml
-├── package.json
-├── package-lock.json
 └── repomix-output.xml
 ```
 

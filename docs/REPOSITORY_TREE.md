@@ -209,12 +209,9 @@ accident-risk-system/
 ├── .env
 ├── .env.example
 ├── .gitignore
-├── .whoop_tokens.json
 ├── AGENTS.md
 ├── README.md
 ├── pyproject.toml
-├── package.json
-├── package-lock.json
 ├── repomix-output.xml
 ├── test 18-10-2026.csv
 ├── Accident_Risk_Model_Explained.pdf

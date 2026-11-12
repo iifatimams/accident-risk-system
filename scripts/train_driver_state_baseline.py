@@ -117,24 +117,26 @@ def main() -> None:
     # chronological order) reduce error vs. the raw per-frame predictions
     # above? If yes, that is real evidence a GRU may be unnecessary for
     # this task; if no, it's evidence smoothing alone isn't enough.
+    #
+    # The window must be causal (historical-only): a live deployment can
+    # only see frames up to "now", so voting must never use frames after i.
     frame_indices = [int(Path(p).stem.split("_")[1]) for p, _ in val_ds.samples]
     order = sorted(range(len(frame_indices)), key=lambda i: frame_indices[i])
     ordered_true = [all_labels[i] for i in order]
     ordered_pred = [all_preds[i] for i in order]
 
     window = 5
-    half = window // 2
     smoothed_pred = []
     for i in range(len(ordered_pred)):
-        lo, hi = max(0, i - half), min(len(ordered_pred), i + half + 1)
-        window_votes = ordered_pred[lo:hi]
+        lo = max(0, i - window + 1)
+        window_votes = ordered_pred[lo:i + 1]
         smoothed_pred.append(max(set(window_votes), key=window_votes.count))
 
     # Extracted samples are every SAMPLE_STRIDE-th real video frame, so a
     # window of `window` extracted samples spans window*SAMPLE_STRIDE real
     # frames at ~29.76fps (confirmed via cv2 on this session's video).
     window_seconds = window * 5 / 29.76
-    print(f"\n=== Rolling majority-vote smoothing (window={window} sampled frames, ~{window_seconds:.2f}s) ===")
+    print(f"\n=== Causal rolling majority-vote smoothing (window={window} sampled frames, ~{window_seconds:.2f}s historical lookback) ===")
     print(classification_report(ordered_true, smoothed_pred, target_names=train_ds.classes, digits=3))
     print("confusion matrix (rows=true, cols=pred):")
     print(confusion_matrix(ordered_true, smoothed_pred))

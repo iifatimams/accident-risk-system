@@ -161,21 +161,28 @@ public final class RoadSenseOnDeviceRiskEngine {
                 )
             )
 
+            // Indices 5, 7, 9, 10, 11, 13 have no live sensor source on an
+            // iPhone, so they fall back to the same defaults train_polidriving.py
+            // substitutes when a training row is missing that column (engine
+            // temperature, heart rate, visibility, precipitation, and the two
+            // local-accident-history counters) -- NOT arbitrary guesses, since
+            // any mismatch here biases every live prediction away from what the
+            // model was actually trained to expect for "unknown".
             let features: [Double] = [
                 hour,
                 speedKmh,
                 rpm,
                 accelObd,
                 throttle,
-                92.0,
+                90.0,
                 load,
                 hr > 0 ? hr : 75.0,
                 weatherCode,
                 10.0,
                 0.0,
-                2.0,
+                0.0,
                 designSpeed,
-                1.0
+                0.0
             ]
 
             for (index, value) in features.enumerated() {
