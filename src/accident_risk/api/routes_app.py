@@ -13,12 +13,14 @@ from pydantic import BaseModel, Field
 
 from accident_risk.api.auth import AuthError, AuthService, Principal, bearer_from_header
 from accident_risk.api.db import Database, role_allows
+from accident_risk.api.notifications import MockNotificationSender, build_message
 from accident_risk.api.recorder import SessionRecorder
 from accident_risk.inference.engine import InferenceEngine
 from accident_risk.schemas import SENSOR_FIELDS
 
 SESSION_TIMEOUT_SECONDS = 180.0
 EDGE_FRESHNESS_SECONDS = 10.0
+UNCONFIRMED_INCIDENT_TIMEOUT_SECONDS = 180.0
 
 
 def has_sensor_values(fields: dict[str, Any]) -> bool:
@@ -65,6 +67,23 @@ class CollisionRequest(BaseModel):
 
 class ResearchConsentRequest(BaseModel):
     granted: bool
+
+
+class FamilyContactRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    phone: str = Field(min_length=3, max_length=30)
+    relationship: str = Field("", max_length=60)
+    notify_accidents: bool = True
+    share_location: bool = False
+
+
+class FamilyTokenRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=200)
+
+
+class FamilyPermissionsRequest(BaseModel):
+    notify_accidents: bool | None = None
+    share_location: bool | None = None
 
 
 class DriverRequest(BaseModel):
@@ -167,9 +186,34 @@ def create_router(
     recorder: SessionRecorder,
     engine: InferenceEngine,
     edge_state: dict[str, dict[str, Any]] | None = None,
+    notification_sender: MockNotificationSender | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/app/api", tags=["application"])
     edge_state = edge_state if edge_state is not None else {}
+    # MockNotificationSender only -- see notifications.py. No real SMS/push/
+    # email provider is wired up; never report a notification from this as
+    # really delivered.
+    notification_sender = notification_sender if notification_sender is not None else MockNotificationSender()
+
+    def notify_family_of_incident(alert: dict[str, Any]) -> None:
+        """Called when a collision incident reaches a status family should
+        know about. Respects each contact's own notify_accidents AND
+        share_location permissions individually; duplicate-suppressed per
+        (alert, contact) by the database's own UNIQUE constraint."""
+        driver = database.get_user(alert["user_id"])
+        if driver is None:
+            return
+        for contact in database.accepted_notifiable_contacts(alert["user_id"]):
+            if database.already_notified(alert["id"], contact["id"]):
+                continue
+            message = build_message(
+                driver["name"], alert["status"], contact["share_location"],
+                alert.get("latitude"), alert.get("longitude"),
+            )
+            status = notification_sender.send(
+                contact_phone=contact["phone"], contact_name=contact["name"], message=message
+            )
+            database.record_family_notification(alert["id"], contact["id"], status)
 
     def driving_state(stream_id: str, fields: dict[str, Any], now: float) -> bool | None:
         """True=driving; False=not driving; None=no recent confirmation.
@@ -221,6 +265,15 @@ def create_router(
             if session_id is not None:
                 recorder.finish(session_id, stream_id, "timeout")
 
+    def timeout_unconfirmed_incidents() -> None:
+        """Call-on-access sweep (same pattern as close_stale_sessions): a
+        collision incident nobody confirms or dismisses in time moves to
+        unconfirmed_timeout rather than sitting open forever -- and family
+        is notified, since the driver not responding is, if anything, MORE
+        reason to let them know than a confirmed response would be."""
+        for timed_out in database.timeout_unconfirmed_incidents(UNCONFIRMED_INCIDENT_TIMEOUT_SECONDS):
+            notify_family_of_incident(timed_out)
+
     @router.post("/auth/request-code")
     def request_code(payload: CodeRequest) -> dict[str, Any]:
         try:
@@ -260,6 +313,7 @@ def create_router(
     @router.get("/driver/state")
     def driver_state(principal: Principal = any_user) -> dict[str, Any]:
         close_stale_sessions()
+        timeout_unconfirmed_incidents()
         session = database.active_session(principal.user_id)
         thresholds = database.get_settings()
         snapshot: dict[str, Any] = {}
@@ -333,6 +387,69 @@ def create_router(
         database.log_access(principal.user_id, principal.role, "research-consent")
         return database.set_research_consent(principal.user_id, payload.granted)
 
+    @router.get("/driver/family-contacts")
+    def list_family_contacts(principal: Principal = any_user) -> list[dict[str, Any]]:
+        return database.list_family_contacts(principal.user_id)
+
+    @router.post("/driver/family-contacts", status_code=201)
+    def invite_family_contact(
+        payload: FamilyContactRequest, principal: Principal = any_user
+    ) -> dict[str, Any]:
+        """invite_token is returned here because the DRIVER is its creator
+        and has no other way to relay it (no bundled SMS/email provider) --
+        this is handing someone their own new resource's token, not
+        leaking anyone else's credential (contrast with the auth code
+        leak fixed earlier: that handed back someone ELSE's login code to
+        an unauthenticated caller who merely guessed a phone number)."""
+        database.log_access(principal.user_id, principal.role, "family-contacts:invite")
+        return database.invite_family_contact(
+            principal.user_id, payload.name, payload.phone,
+            relationship=payload.relationship,
+            notify_accidents=payload.notify_accidents,
+            share_location=payload.share_location,
+        )
+
+    @router.post("/driver/family-contacts/{contact_id}/revoke")
+    def revoke_family_contact(contact_id: int, principal: Principal = any_user) -> dict[str, Any]:
+        updated = database.revoke_family_contact(contact_id, principal.user_id)
+        if updated is None:
+            raise HTTPException(404, "Contact not found")
+        return updated
+
+    @router.patch("/driver/family-contacts/{contact_id}")
+    def update_family_contact_permissions(
+        contact_id: int, payload: FamilyPermissionsRequest, principal: Principal = any_user
+    ) -> dict[str, Any]:
+        """notify_accidents and share_location are configured independently
+        here -- the driver's own choice, separate from whether the contact
+        has accepted. Accepting never grants location access by itself."""
+        updated = database.update_family_contact_permissions(
+            contact_id, principal.user_id,
+            notify_accidents=payload.notify_accidents, share_location=payload.share_location,
+        )
+        if updated is None:
+            raise HTTPException(404, "Contact not found")
+        return updated
+
+    @router.post("/family/accept")
+    def accept_family_invite(payload: FamilyTokenRequest) -> dict[str, Any]:
+        """Public, token-only -- the contact is not a users() row and never
+        logs in. This is the explicit consent action the roadmap asks for:
+        accepting is a deliberate act by the contact, never assumed."""
+        accepted = database.accept_family_contact(payload.token)
+        if accepted is None:
+            raise HTTPException(404, "Invalid or already-used invite token")
+        return {"status": "accepted", "driver_user_id": accepted["driver_user_id"]}
+
+    @router.post("/family/acknowledge")
+    def acknowledge_family_notification(payload: FamilyTokenRequest) -> dict[str, Any]:
+        """Public, token-only -- lets a notified contact confirm they saw
+        it, without needing an account."""
+        acknowledged = database.acknowledge_family_notification(payload.token)
+        if acknowledged is None:
+            raise HTTPException(404, "Invalid acknowledge token")
+        return {"status": "acknowledged"}
+
     @router.post("/driver/session/start")
     def start_session(payload: StartSessionRequest, principal: Principal = any_user) -> dict[str, Any]:
         existing = database.active_session(principal.user_id)
@@ -380,13 +497,24 @@ def create_router(
         kind: str | None = Query(None),
         limit: int = Query(100, ge=1, le=500),
     ) -> list[dict[str, Any]]:
+        timeout_unconfirmed_incidents()
         scope = None if role_allows(principal.role, "account_manager") else principal.user_id
         database.log_access(principal.user_id, principal.role, "alerts")
         return database.list_alerts(user_id=scope, kind=kind, limit=limit)
 
     @router.post("/alerts/{alert_id}/{action}")
     def act_on_alert(alert_id: int, action: str, principal: Principal = any_user) -> dict[str, Any]:
-        if action not in {"confirm", "cancel"}:
+        # confirm/cancel: unchanged from before (high_risk alerts, manual
+        # collision reports). dismiss/resolve are new, lifecycle-enforced
+        # actions for an automatically DETECTED incident (see
+        # recorder.check_collision / INCIDENT_LIFECYCLE) -- "dismiss" is the
+        # driver saying a suspected impact wasn't real; "resolve" is an
+        # explicit administrative close-out after confirm/dismiss/timeout.
+        status_by_action = {
+            "confirm": "confirmed", "cancel": "cancelled",
+            "dismiss": "dismissed", "resolve": "resolved",
+        }
+        if action not in status_by_action:
             raise HTTPException(404, "Unknown action")
         existing = next((a for a in database.list_alerts(limit=500) if a["id"] == alert_id), None)
         if existing is None:
@@ -394,11 +522,30 @@ def create_router(
         if not role_allows(principal.role, "account_manager") and (existing["user_id"] != principal.user_id):
             raise HTTPException(403, "You can only act on your own alerts")
 
-        status = "confirmed" if action == "confirm" else "cancelled"
-        updated = database.set_alert_status(alert_id, status, principal.user_id)
+        try:
+            updated = database.set_alert_status(
+                alert_id, status_by_action[action], principal.user_id,
+                enforce_lifecycle=action in {"dismiss", "resolve"},
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         if updated is None:
             raise HTTPException(404, "Alert not found")
+        if updated["kind"] == "collision" and updated["status"] == "confirmed":
+            notify_family_of_incident(updated)
         return updated
+
+    @router.get("/alerts/{alert_id}/family-notifications")
+    def alert_family_notifications(alert_id: int, principal: Principal = any_user) -> list[dict[str, Any]]:
+        """Which permitted (accepted + notify_accidents) family contacts
+        were actually notified about this incident, and whether each has
+        acknowledged -- the driver's own view of who was told."""
+        existing = next((a for a in database.list_alerts(limit=500) if a["id"] == alert_id), None)
+        if existing is None:
+            raise HTTPException(404, "Alert not found")
+        if not role_allows(principal.role, "account_manager") and (existing["user_id"] != principal.user_id):
+            raise HTTPException(403, "You can only view your own alerts")
+        return database.list_family_notifications(alert_id)
 
     @router.get("/sessions")
     def sessions(
@@ -473,6 +620,7 @@ def create_router(
     @router.get("/live")
     def live(principal: Principal = manager) -> dict[str, Any]:
         close_stale_sessions()
+        timeout_unconfirmed_incidents()
         thresholds = database.get_settings()
         synchronizer = engine.pipeline.synchronizer
         now = time.time()

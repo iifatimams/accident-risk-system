@@ -10,7 +10,7 @@ from threading import Lock
 
 from accident_risk.schemas import SENSOR_FIELDS, SensorFrame
 
-CSV_FIELDS = ("timestamp", "stream_id", "source", *SENSOR_FIELDS, "sensor_timestamps")
+CSV_FIELDS = ("timestamp", "stream_id", "source", *SENSOR_FIELDS, "client_incident_id", "sensor_timestamps")
 
 
 class CSVRecorder:

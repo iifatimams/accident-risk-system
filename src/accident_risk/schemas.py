@@ -63,6 +63,13 @@ class SensorFrame(BaseModel):
     )
     physiology_signal_quality: Score | None = None
     is_roundabout: bool | None = Field(None, description="True if vehicle is inside a roundabout")
+    # A client-generated stable id for ONE specific collision-detector
+    # trigger (see CollisionDetector.swift / collision_detector.py). Not a
+    # sensor reading -- must never forward-fill into later frames, so it is
+    # explicitly excluded from SENSOR_FIELDS below. Lets a retried/offline-
+    # queued upload of the SAME detected event be recognized as the same
+    # incident server-side, not a new one.
+    client_incident_id: str | None = Field(None, max_length=64)
     sensor_timestamps: dict[str, Annotated[Finite, Field(ge=0)]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -79,7 +86,7 @@ class SensorFrame(BaseModel):
 SENSOR_FIELDS = tuple(
     name
     for name in SensorFrame.model_fields
-    if name not in {"timestamp", "stream_id", "source", "sensor_timestamps"}
+    if name not in {"timestamp", "stream_id", "source", "sensor_timestamps", "client_incident_id"}
 )
 PHYSIOLOGY_FIELDS = (
     "heart_rate",

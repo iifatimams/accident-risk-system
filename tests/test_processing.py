@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from accident_risk.processing import collision_detector
 from accident_risk.processing.pipeline import FeaturePipeline
 from accident_risk.processing.synchronization import Synchronizer, resample
 from accident_risk.processing.validation import validate_records
@@ -14,6 +15,52 @@ from accident_risk.sources.live_buffer import LiveBuffer
 
 def frame(t, **kwargs):
     return SensorFrame(timestamp=t, stream_id="synthetic", source="test", **kwargs)
+
+
+def accel_frame(t, x, y, z):
+    return frame(t, accel_x=x, accel_y=y, accel_z=z)
+
+
+def test_collision_detector_ignores_frames_without_accel():
+    assert collision_detector.check(frame(100)) is None
+
+
+def test_collision_detector_normal_driving_does_not_trigger():
+    # ~1.0g, gravity-dominated, as on a phone resting in a mount.
+    suspicion = collision_detector.check(accel_frame(100, x=0.1, y=0.1, z=9.8))
+    assert suspicion.triggered is False
+    assert suspicion.score < 1.0
+
+
+def test_collision_detector_hard_braking_is_a_negative_example():
+    # Hard braking adds real deceleration (~1.5g combined) but is ordinary
+    # driving, not a collision -- must not trigger.
+    suspicion = collision_detector.check(accel_frame(100, x=11.0, y=0.2, z=9.8))
+    assert suspicion.triggered is False
+
+
+def test_collision_detector_a_bump_is_a_negative_example():
+    # A pothole/speed bump jolt (~1.8g vertical) -- still ordinary driving.
+    suspicion = collision_detector.check(accel_frame(100, x=0.2, y=0.2, z=17.0))
+    assert suspicion.triggered is False
+
+
+def test_collision_detector_phone_handling_is_a_negative_example():
+    # Picking up/dropping the phone can spike accelerometer readings sharply
+    # but briefly -- below the collision threshold, same as any other
+    # non-collision jolt, since this detector has no notion of "in-vehicle".
+    suspicion = collision_detector.check(accel_frame(100, x=5.0, y=5.0, z=12.0))
+    assert suspicion.triggered is False
+
+
+def test_collision_detector_triggers_on_a_simulated_impact():
+    # ~2.6g combined, above the 2.5g threshold -- a simulated impact spike,
+    # well under the VZCrash research's observed mean crash peak (~3.9g).
+    suspicion = collision_detector.check(accel_frame(100, x=25.0, y=0.0, z=5.0))
+    assert suspicion.triggered is True
+    assert suspicion.score >= 1.0
+    assert suspicion.onset_estimate == 100
+    assert suspicion.model_version == collision_detector.MODEL_VERSION
 
 
 def test_resample_is_causal_and_not_spo2_paced():
