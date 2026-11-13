@@ -284,11 +284,14 @@ Amazfit strap was available in this environment. Every verification this
 session used `xcodebuild` (compile-only, iOS Simulator destination),
 `swift test` (unit tests, macOS host), and `pytest` (Python, isolated/
 temp databases only) -- never a physical device, and never the real
-`data/app.sqlite3`. A real test matrix (portrait/landscape mounting,
-daylight/night, both cameras under thermal load, OBD+WHOOP+Amazfit
-connected simultaneously, GPS quality variation, extended sessions) still
-needs to be run on actual hardware before any of this session's fixes can
-be called device-validated, not just logic-validated.
+`data/app.sqlite3`. A full 10-row test matrix (portrait/landscape
+mounting, daylight/night, both cameras under thermal load,
+OBD+WHOOP+Amazfit connected simultaneously, GPS signal loss, an app-killed
+mid-incident recovery check, a full-offline-drive dedup check, and the
+known dropped-phone-vs-collision limitation) is written out, ready to
+execute and check off, in `DEVELOPMENT_PROGRESS.md`'s "Phase 18" section
+-- it still needs to be run on actual hardware before any of this
+session's fixes can be called device-validated, not just logic-validated.
 
 ## 18. Limitations and false-positive analysis
 
@@ -368,8 +371,8 @@ Per the directive's own distinctions, applied honestly per phase above:
 | 17 Research export | yes | yes | yes | n/a | n/a |
 | 8 UAE simulation | **no** | **no** | n/a | n/a | n/a |
 | 11 Future-risk prediction | research only | **no** | n/a | n/a | inconclusive (see doc) |
-| 13 Offline sync | yes (checkpoint #3) | yes | yes | **no** | n/a |
+| 13 Offline sync | yes | yes | yes (unit + end-to-end code audit) | **no** | n/a |
 | 14 Family notifications | partial (consent/UI) | partial | yes (mock sender) | **no** | n/a (no real provider) |
-| 18 Device test matrix | n/a | n/a | n/a | **not performed** | n/a |
+| 18 Device test matrix | yes (10 rows, written) | n/a | n/a | **not executed** | n/a |
 
 No row in this table claims more than what was actually done.
