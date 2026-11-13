@@ -1004,9 +1004,134 @@ Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **98
 passed** (8 new). `pytest`: **177 passed** (unaffected -- iOS-only
 change). No Android, `data/raw`, or real-database changes.
 
-## Phases 11, 13-14, 18-19
+## Phase 19 -- final capstone documentation: DONE
 
-Not started. (Phases 15, 16 and 17 are done, see their own sections
-above.) Phase 14 (family monitoring UI/real provider) was explicitly
-deferred by the user's own instruction this session ("the family
-notification thingy can be added later").
+Wrote `docs/CAPSTONE_DELIVERY.md` as the single consolidated entry point
+(architecture, hardware, per-phase status, and an honest "what counts as
+100%" maturity matrix distinguishing implemented/integrated/
+tested-synthetic/tested-physical-device/validated-real-data). While
+writing it, found and fixed a real documentation bug: `docs/
+IPHONE_LOGIN_TESTING.md` still described a demo pairing-key system
+(`scripts/serve_demo.py`) that commit `3ce2f3a3` had deleted months
+before this session, with the doc never updated to match. Rewrote it to
+describe the real current Mac-local-operator-console flow, and removed
+`scripts/test_ios_auth.sh` (a copy-based test workaround made obsolete by
+the Phase 1 `ios/Package.swift` fix; confirmed via grep it was referenced
+nowhere except the stale doc, and that it would silently miss every
+pure-logic Swift test file added after it was written).
+
+Verification: `pytest` -> 177 passed (unaffected). `swift test` -> 98
+passed (unaffected). No code behavior changed in this phase, only docs
+and one obsolete script.
+
+## Phase 13 -- offline incident storage/sync: AUDITED, no new bugs found
+
+The master directive asks for this as its own phase; checkpoint resume
+tasks #1-#4 (documented above, under "Checkpoint resume tasks") already
+fixed the real bugs that existed in this code (main-thread deadlock on
+confirm/dismiss, missing-column migration, non-atomic/non-persistent
+dedup, missing lifecycle enforcement -> infinite-retry bug). This section
+is the explicit end-to-end audit of the *resulting* design, read fresh
+end to end rather than bug-by-bug, specifically checking the offline
+contract the directive requires: **the phone must never lose a
+suspected-collision event, online or offline.**
+
+Traced the actual code path (`CollisionIncidentStore.swift` +
+`BackgroundCaptureService.swift`):
+
+1. **Detection -> local durability, synchronous, before any network
+   call**: `incidentStore.record(...)` (line ~869) executes and returns
+   BEFORE `self.suspectedCollision = suspicion` is set -- confirmed by
+   reading the exact call order, not assumed. `record()` itself uses a
+   serial `DispatchQueue.sync`, so it has returned (data genuinely
+   written to `UserDefaults`) before the next line runs. If the app is
+   killed one instruction later, the incident already exists on disk.
+2. **Resume after a kill mid-incident**: `unresolvedSuspected()` is
+   called on launch/foreground (confirmed wired up at line 789, not just
+   defined-but-unused) to re-surface the confirm/dismiss prompt for any
+   incident still `.suspected` -- without creating a duplicate detection
+   or re-showing one already resolved.
+3. **Initial upload, offline or server-down**: `reportCollisionImmediately`
+   fires an out-of-band POST immediately (doesn't wait for the normal
+   0.3s telemetry cadence, which could decimate past the exact triggering
+   sample); on any failure it's simply left `uploaded: false` -- no error
+   is swallowed into a crash or a lost record.
+4. **Retry**: a 10s `Timer` (`incidentRetryTimer`, started/invalidated
+   alongside the capture session itself, confirmed it's torn down on stop
+   so it can't fire against a dead session) re-attempts every
+   `pendingUpload()` incident. `client_incident_id` round-trips through
+   the retry, and the server's `get_or_create_collision_alert` uses an
+   atomic `INSERT ... ON CONFLICT(client_incident_id) DO NOTHING`
+   (`db.py`), so a retry that actually succeeded server-side but whose
+   response was lost (e.g. app backgrounded mid-request) resolves to the
+   SAME server record on the next retry, not a duplicate.
+5. **Decision sync (confirm/dismiss)**: works with zero connectivity --
+   `confirmSuspectedCollision`/`dismissSuspectedCollision` update the
+   local store synchronously first, independent of whether the server
+   has even seen the incident yet (`syncedDecision: false` just sits
+   there until `pendingDecisionSync()` picks it up once `uploaded`
+   becomes true). The 409-vs-other-failure distinction (checkpoint #4's
+   fix) is still correct on this fresh read: a genuine permanent
+   rejection stops retrying (`syncRejected`), while a transient failure
+   (401/403/5xx, or no network at all) keeps retrying every cycle.
+
+**No new bug found in this pass.** This is a real negative result, not a
+skipped check: the design was read line-by-line against the specific
+one-sentence contract above, with each of the 5 steps traced to an exact
+line number, not inferred from file names.
+
+**Known, already-documented limitation, restated here since it's exactly
+this phase's concern**: `CollisionIncidentStore` persists via
+`UserDefaults` as a single JSON-encoded array, appropriate at this
+project's scale (a handful of incidents per device) but not something
+that would scale to a fleet-telemetry volume -- a deliberate, documented
+simplicity choice for a capstone, not an oversight.
+
+Verification: no code changed in this phase (audit only); existing
+`CollisionIncidentStoreTests.swift` (5 tests) and
+`test_db_migration.py`/`test_app_api.py`'s incident-lifecycle tests still
+cover the mechanisms traced above. `pytest` -> 177 passed. `swift test`
+-> 98 passed.
+
+## Phase 18 -- final physical-device test matrix: PREPARED, NOT EXECUTED
+
+No physical iPhone, OBD adapter, WHOOP strap, or Amazfit strap was
+available in this environment at any point this session. What follows is
+the test matrix itself, written so it can be executed and checked off
+directly once hardware is available -- this is the honest, concrete form
+of "prepare the code and exact test instructions" the directive asks for
+when a phase needs hardware this environment doesn't have.
+
+| # | Test | Setup | Pass condition |
+|---|---|---|---|
+| 1 | Portrait mount, front camera | Phone upright in a standard windshield/dash mount | Attention state updates in the dashboard within ~1s of a real head turn away from the road |
+| 2 | Landscape mount, both cameras | Phone rotated 90 degrees in mount | Video is right-side-up on screen for BOTH cameras simultaneously (this is the specific landscape divergence flagged as UNVERIFIED in `CameraOrientation.swift` and section 3 of `CAPSTONE_DELIVERY.md` -- if it fails, the fix is a one-line sign flip documented in that file's comments) |
+| 3 | Night driving, front camera | Dusk/night, dashboard lighting only | `faceNotDetected`/`uncertain` states (not silently `attentive`) when the driver's face genuinely isn't visible to Vision |
+| 4 | Sustained thermal load | Both cameras + CoreML running for 30+ minutes | No iOS thermal-throttling frame-rate collapse below a usable rate; `publishProcessingLatency` values stay bounded, not climbing unboundedly |
+| 5 | OBD + WHOOP + Amazfit simultaneously connected | All three paired before a drive | All three publish readings without one disconnecting the others (each uses its own independent `CBCentralManager`, confirmed at the code level in section 9/12 of `CAPSTONE_DELIVERY.md`; real simultaneous operation is the untested part) |
+| 6 | GPS signal loss (tunnel/parking garage) | Drive through a known dead zone | `isWeatherLiveData`/`isDesignSpeedFromMapData` correctly drop to `false` rather than silently reusing stale coordinates as if current |
+| 7 | App killed mid-suspected-collision | Force-quit the app in the ~5s window between a hard-brake trigger and the driver tapping confirm/dismiss | On relaunch, the SAME suspected incident reappears for confirm/dismiss (Phase 13's `unresolvedSuspected()`, audited above) -- not lost, not duplicated |
+| 8 | Full offline drive, then reconnect | Airplane mode for the whole drive, re-enable networking afterward | Every incident detected offline uploads exactly once on reconnect (no duplicates, confirmed at the design level via `client_incident_id` dedup, audited above) |
+| 9 | Real-world dropped-phone vs. real collision | Drop the phone (not in a vehicle) vs. a controlled low-speed impact test | Documents the KNOWN, undischarged limitation (section 10 of `CAPSTONE_DELIVERY.md`): expect this test to currently FAIL to discriminate the two; record the actual accelerometer traces as the first real data point toward a future fix, not a pass/fail gate on this session's work |
+| 10 | End-to-end sign-in | Full `IPHONE_LOGIN_TESTING.md` walkthrough on a real device over an actual ngrok tunnel | Matches that document's rewritten (this session) description exactly |
+
+Executing this matrix, and updating `CAPSTONE_DELIVERY.md` section 17/20
+from "not performed" to actual pass/fail results per row, is the
+concrete remaining work this session could not do without hardware.
+
+## Phase 11, Phase 8, Phase 14 -- not re-engaged / not started
+
+- **Phase 11** (future-collision research): correctly NOT re-engaged.
+  `FUTURE_RISK_RESEARCH_SUMMARY.md` (pre-existing) already reached and
+  documented a considered stopping point ("do not indefinitely optimize
+  against VZCrash... no model from this work is deployed"); re-opening it
+  without new data would contradict the directive's own instruction not
+  to endlessly tune against the same dataset.
+- **Phase 8** (UAE SUMO/CARLA simulation): not started. Installing a
+  simulator is an environment decision (which tool, how much disk/compute)
+  the directive itself asks to check before installing, and nothing in
+  this environment can make that call autonomously -- see section 13 of
+  `CAPSTONE_DELIVERY.md`.
+- **Phase 14** (family monitoring UI/real provider): explicitly deferred
+  by the user's own instruction this session ("the family notification
+  thingy can be added later"). Not started by design, not an omission.
