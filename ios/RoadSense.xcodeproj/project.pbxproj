@@ -29,6 +29,8 @@
 		FE0000000000000000000006 /* PedestrianHazard.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000006 /* PedestrianHazard.swift */; };
 		FE0000000000000000000007 /* RiskFusionHeuristics.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000007 /* RiskFusionHeuristics.swift */; };
 		FE0000000000000000000008 /* RoadContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000008 /* RoadContext.swift */; };
+		FE0000000000000000000009 /* WearableHeartRate.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000009 /* WearableHeartRate.swift */; };
+		FE000000000000000000000A /* AmazfitClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD000000000000000000000A /* AmazfitClient.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -57,6 +59,8 @@
 		FD0000000000000000000006 /* PedestrianHazard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PedestrianHazard.swift; sourceTree = "<group>"; };
 		FD0000000000000000000007 /* RiskFusionHeuristics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RiskFusionHeuristics.swift; sourceTree = "<group>"; };
 		FD0000000000000000000008 /* RoadContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoadContext.swift; sourceTree = "<group>"; };
+		FD0000000000000000000009 /* WearableHeartRate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WearableHeartRate.swift; sourceTree = "<group>"; };
+		FD000000000000000000000A /* AmazfitClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AmazfitClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -119,6 +123,8 @@
 				FD0000000000000000000006 /* PedestrianHazard.swift */,
 				FD0000000000000000000007 /* RiskFusionHeuristics.swift */,
 				FD0000000000000000000008 /* RoadContext.swift */,
+				FD0000000000000000000009 /* WearableHeartRate.swift */,
+				FD000000000000000000000A /* AmazfitClient.swift */,
 				D6105DDE7FBFC679ABC34F27 /* BackgroundCaptureService.swift */,
 				560FCDD6F283C49A9440E7D8 /* CollisionDetector.swift */,
 				CA3C40C49D9D4D4C83A699C1 /* CollisionIncidentStore.swift */,
@@ -198,6 +204,8 @@
 				FE0000000000000000000006 /* PedestrianHazard.swift in Sources */,
 				FE0000000000000000000007 /* RiskFusionHeuristics.swift in Sources */,
 				FE0000000000000000000008 /* RoadContext.swift in Sources */,
+				FE0000000000000000000009 /* WearableHeartRate.swift in Sources */,
+				FE000000000000000000000A /* AmazfitClient.swift in Sources */,
 				31A5EFE48F7CEB8742DA52AB /* BackgroundCaptureService.swift in Sources */,
 				B54BAA26EE1682B071B753F8 /* CollisionDetector.swift in Sources */,
 				8BEEC662796568A0B0E898E3 /* CollisionIncidentStore.swift in Sources */,

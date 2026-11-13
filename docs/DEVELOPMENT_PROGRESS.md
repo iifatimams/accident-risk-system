@@ -950,6 +950,63 @@ Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **90
 passed** (5 new). `pytest`: **177 passed** (unaffected -- this was an
 iOS-only fix). No Android, `data/raw`, or real-database changes.
 
-## Phases 11, 13-15, 18-19
+## Phase 15 -- Amazfit Helio Strap: IMPLEMENTED (logic-complete, UNVERIFIED on physical hardware)
 
-Not started. (Phases 16 and 17 are done, see their own sections above.)
+Added per the directive's explicit instruction (Fitbit stays out of
+scope; Amazfit is explicitly in). `AmazfitClient.swift` mirrors
+`WhoopClient.swift`'s already-working mechanism almost exactly: the
+standard Bluetooth GATT Heart Rate Service (0x180D) and Heart Rate
+Measurement characteristic (0x2A37) -- NOT an Amazfit/Zepp-proprietary
+protocol, per the directive's own instruction ("use supported device
+functionality, not undocumented cloud-password scraping"). Kept as a
+separate class rather than merging WHOOP and Amazfit into one generic
+abstraction, matching the directive's own framing of them as two
+parallel, separately-identified devices, and so the already-working WHOOP
+path was not touched beyond extracting its shared parsing logic.
+
+Extracted that shared logic into `WearableHeartRate.swift` (pure,
+Foundation-only, no CoreBluetooth dependency): `parseHeartRateMeasurement`
+decodes the standard characteristic's bitfield-flagged payload (UInt8 vs
+UInt16 BPM, optional Energy Expended field correctly skipped rather than
+misread as RR interval, optional RR-Interval field). `WhoopClient.swift`
+was refactored to call this same function -- a pure behavior-preserving
+extraction, not a rewrite. Wired `AmazfitClient` into
+`BackgroundCaptureService` in parallel with WHOOP: its own
+`isAmazfitConnected` published property and `SensorFrame.isAmazfitConnected`
+field, merging into the same `heartRate`/`rrIntervalMs` frame fields WHOOP
+already uses (this app has no per-sensor physiology source attribution at
+all today -- a pre-existing limitation, not introduced here).
+
+8 new Swift tests (`WearableHeartRateTests`) -- "test with mocked BLE
+packets first," per the directive, is exactly what these are: synthetic
+byte arrays matching the real GATT spec, not a connection to any physical
+device. Covers UInt8 and UInt16 BPM encodings, BPM values a UInt8 field
+could never represent (300), the Energy-Expended field being correctly
+skipped rather than misread as an RR interval, a packet with both optional
+fields present, and that an empty/truncated/zero-BPM packet returns nil
+rather than a fabricated reading.
+
+**UNVERIFIED on physical hardware -- stated directly in
+`AmazfitClient.swift`'s own doc comment**, per the directive's explicit
+requirement:
+- Whether the Helio Strap actually exposes the standard service by
+  default, or needs its "Heart Rate Push" setting enabled first (the
+  directive names this exact setting; nothing in this codebase can check
+  it without the physical strap).
+- Whether WHOOP and Amazfit can stream simultaneously -- each gets its own
+  `CBCentralManager`, which should not conflict at the iOS BLE stack
+  level, but real simultaneous operation with both devices worn has not
+  been tested.
+- No HRV, SpO2, or stress value is fabricated -- only heart rate and RR
+  interval are read, the same two fields WHOOP already provides.
+
+Verification: `xcodebuild`: **BUILD SUCCEEDED**. `swift test`: **98
+passed** (8 new). `pytest`: **177 passed** (unaffected -- iOS-only
+change). No Android, `data/raw`, or real-database changes.
+
+## Phases 11, 13-14, 18-19
+
+Not started. (Phases 15, 16 and 17 are done, see their own sections
+above.) Phase 14 (family monitoring UI/real provider) was explicitly
+deferred by the user's own instruction this session ("the family
+notification thingy can be added later").

@@ -701,12 +701,16 @@ public class BackgroundCaptureService:
   ObservableObject,
   CLLocationManagerDelegate,
   ObdDelegate,
-  WhoopDelegate
+  WhoopDelegate,
+  AmazfitDelegate
 {
   private lazy var locationManager = CLLocationManager()
   private lazy var motionManager = CMMotionManager()
   public let obdClient = ObdBleClient()
   public let whoopClient = WhoopClient()
+  // Phase 15: UNVERIFIED on physical hardware -- see AmazfitClient.swift's
+  // own doc comment for exactly what is and isn't confirmed.
+  public let amazfitClient = AmazfitClient()
   public let visionManager = VisionManager()
   // MARK: On-Device Core ML
   private let edgeML = RoadSenseOnDeviceRiskEngine()
@@ -734,6 +738,7 @@ public class BackgroundCaptureService:
   @Published public private(set) var isRunning: Bool = false
   @Published public private(set) var isObdConnected: Bool = false
   @Published public private(set) var isWhoopConnected: Bool = false
+  @Published public private(set) var isAmazfitConnected: Bool = false
   // A UI can observe this to present an immediate "did you crash?"
   // confirm/dismiss prompt, independent of polling the server's
   // pending_collision status.
@@ -750,6 +755,7 @@ public class BackgroundCaptureService:
     motionQueue.qualityOfService = .utility
     obdClient.delegate = self
     whoopClient.delegate = self
+    amazfitClient.delegate = self
   }
   // MARK: Start
   public func start(
@@ -776,6 +782,7 @@ public class BackgroundCaptureService:
       self.isRunning = true
       self.isObdConnected = false
       self.isWhoopConnected = false
+      self.isAmazfitConnected = false
       // Re-present any crash the app never finished showing (e.g. it was
       // killed right after detection) -- without creating a new detection,
       // and never for one already confirmed/dismissed.
@@ -875,6 +882,7 @@ public class BackgroundCaptureService:
     // MARK: External Sensors
     obdClient.start()
     whoopClient.startPolling()
+    amazfitClient.startPolling()
     visionManager.startCamera()
     // MARK: Streaming
     DispatchQueue.main.async { [weak self] in
@@ -1418,6 +1426,34 @@ public class BackgroundCaptureService:
       }
     }
   }
+  // MARK: Amazfit Telemetry
+  // Merges into the SAME currentFrame.heartRate/rrIntervalMs fields WHOOP
+  // uses -- this app has no per-sensor source attribution for physiology
+  // readings today (a pre-existing limitation, not introduced here; see
+  // Phase 15's progress notes). Do not assume WHOOP and Amazfit running
+  // simultaneously produces a sensible merged reading -- untested.
+  public func didUpdateAmazfit(
+    heartRate: Double?,
+    rrInterval: Double?
+  ) {
+    syncQueue.async { [weak self] in
+      guard let self = self else {
+        return
+      }
+      if let hr = heartRate,
+        hr > 0
+      {
+        self.currentFrame.heartRate = hr
+        self.currentFrame.isAmazfitConnected = true
+        DispatchQueue.main.async {
+          self.isAmazfitConnected = true
+        }
+      }
+      if let rr = rrInterval {
+        self.currentFrame.rrIntervalMs = rr
+      }
+    }
+  }
   // MARK: Stop
   public func stop() {
     guard isRunning else {
@@ -1431,6 +1467,7 @@ public class BackgroundCaptureService:
     motionManager.stopDeviceMotionUpdates()
     obdClient.stop()
     whoopClient.stop()
+    amazfitClient.stop()
     visionManager.stopCamera()
     syncQueue.async {
       self.movementBeganAt = nil
@@ -1445,6 +1482,7 @@ public class BackgroundCaptureService:
       self.isRunning = false
       self.isObdConnected = false
       self.isWhoopConnected = false
+      self.isAmazfitConnected = false
       self.forwardHazardState = .noRelevantLeadObject
     }
   }
