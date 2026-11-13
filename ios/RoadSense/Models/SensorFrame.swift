@@ -36,6 +36,8 @@ public struct SensorFrame: Codable {
     public var heartRate: Double?
     public var rrIntervalMs: Double?
     public var isWhoopConnected: Bool = false
+    // Phase 15: UNVERIFIED on physical hardware -- see AmazfitClient.swift.
+    public var isAmazfitConnected: Bool = false
     
     // 7-Factor Multimodal Variables
     public var eyesOnRoad: Bool = true
@@ -141,6 +143,7 @@ public struct SensorFrame: Codable {
         dict["bpm"] = hr
         dict["hr"] = hr
         dict["whoop_connected"] = isWhoopConnected
+        dict["amazfit_connected"] = isAmazfitConnected
         
         // Output Vision Factors
         dict["eyes_on_road"] = eyesOnRoad

@@ -131,34 +131,13 @@ public class WhoopClient: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
     }
     
     private func parseHeartRate(_ data: Data) {
-        let buffer = [UInt8](data)
-        let flags = buffer[0]
-        let isUInt16 = (flags & 0x01) != 0
-        var offset = 1
-        var bpm: Double = 0.0
-        
-        if isUInt16 && buffer.count >= 3 {
-            let val = UInt16(buffer[1]) | (UInt16(buffer[2]) << 8)
-            bpm = Double(val)
-            offset = 3
-        } else if buffer.count >= 2 {
-            bpm = Double(buffer[1])
-            offset = 2
+        // Shared with AmazfitClient -- both devices are expected to expose
+        // the same standard Bluetooth Heart Rate Measurement characteristic.
+        // See WearableHeartRate.swift.
+        guard let reading = WearableHeartRate.parseHeartRateMeasurement([UInt8](data)) else {
+            return
         }
-        
-        if (flags & 0x08) != 0 {
-            offset += 2
-        }
-        
-        var rrMs: Double? = nil
-        if (flags & 0x10) != 0 && buffer.count >= offset + 2 {
-            let rawRR = UInt16(buffer[offset]) | (UInt16(buffer[offset + 1]) << 8)
-            rrMs = (Double(rawRR) / 1024.0) * 1000.0
-        }
-        
-        if bpm > 0 {
-            delegate?.didUpdateWhoop(heartRate: bpm, rrInterval: rrMs)
-        }
+        delegate?.didUpdateWhoop(heartRate: reading.heartRateBpm, rrInterval: reading.rrIntervalMs)
     }
     
     public func stop() {

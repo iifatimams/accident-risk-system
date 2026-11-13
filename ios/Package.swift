@@ -51,6 +51,7 @@ let package = Package(
                 // StoredIncident's sync-rejection logic (this session's fix
                 // for an infinite-retry bug) is actually unit tested.
                 "Services/ContextManager.swift",
+                "Services/AmazfitClient.swift",
                 "Services/ObdBleClient.swift",
                 "Services/RoadSenseOnDeviceRiskEngine.swift",
                 "Services/Uploader.swift",
