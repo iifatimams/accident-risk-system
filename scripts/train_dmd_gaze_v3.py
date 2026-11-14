@@ -10,11 +10,28 @@ that distinction at all, and the capstone directive explicitly asks for
 it ("distinguish brief mirror and instrument-cluster checks from
 sustained distraction").
 
-Same recipe as v2 (fine-tune the last 2 inverted-residual blocks, not
-just the classifier head; ColorJitter + small RandomRotation
-augmentation; weighted sampling for class imbalance) and the same
+Started with v2's recipe (fine-tune the last 2 inverted-residual
+blocks, not just the classifier head). That OVERFIT badly on this
+dataset: held-out-driver accuracy 0.345, off_road recall 0.023 --
+barely above random for 3 classes. Each driver's gaze-category session
+is a single short, scripted calibration clip (little within-class
+visual diversity per driver), so fine-tuning real conv-layer weights
+on only 4 such clips memorized driver-specific appearance rather than
+the general gaze-direction concept.
+
+HEAD-ONLY training (freeze the whole backbone, only train the final
+linear layer -- the SAME recipe v1's binary model used) generalizes
+far better on this specific dataset: held-out accuracy 0.552, off_road
+recall 0.765. This is the opposite lesson from the v1->v2 improvement
+on the DISTRACTION-category binary task (where fine-tuning deeper
+layers helped) -- a real, measured, dataset-specific finding, not a
+general rule; see docs/FINAL_MULTIMODAL_RESULTS.md for both numbers.
+This script now trains head-only, matching what was actually measured
+and deployed.
+
+Same augmentation (ColorJitter + small RandomRotation) and
 held-out-driver discipline (train: gC-14/gA-1/gB-6/gE-28, val: gF-23,
-never seen in training).
+never seen in training) as before.
 """
 
 import json
@@ -32,9 +49,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = REPO_ROOT / "data/interim/dmd_frames/gaze_multisession_dataset"
 OUT_DIR = REPO_ROOT / "artifacts/dmd_gaze_v3"
 BATCH_SIZE = 32
-EPOCHS = 15
+EPOCHS = 8
 HEAD_LR = 1e-3
-FINE_TUNE_LR = 1e-4
 
 
 def select_device() -> torch.device:
@@ -46,12 +62,12 @@ def select_device() -> torch.device:
 
 
 def build_model(n_classes: int):
+    # Head-only (see module docstring: fine-tuning the backbone overfit
+    # badly on this dataset's small, low-diversity-per-driver clips).
     weights = MobileNet_V3_Small_Weights.DEFAULT
     model = mobilenet_v3_small(weights=weights)
     for param in model.parameters():
         param.requires_grad = False
-    for param in model.features[-2:].parameters():
-        param.requires_grad = True
     in_features = model.classifier[-1].in_features
     model.classifier[-1] = nn.Linear(in_features, n_classes)
     return model, weights.transforms()
@@ -86,10 +102,7 @@ def main() -> None:
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
 
-    optimizer = torch.optim.Adam([
-        {"params": model.classifier[-1].parameters(), "lr": HEAD_LR},
-        {"params": model.features[-2:].parameters(), "lr": FINE_TUNE_LR},
-    ])
+    optimizer = torch.optim.Adam(model.classifier[-1].parameters(), lr=HEAD_LR)
     criterion = nn.CrossEntropyLoss()
 
     start = time.time()

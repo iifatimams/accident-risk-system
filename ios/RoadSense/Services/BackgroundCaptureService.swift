@@ -9,13 +9,25 @@ import Vision
 // MARK: - Vision Manager (7-Factor Multimodal Tracking)
 public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate
 {
-  // DMD-trained driver-attention model (scripts/train_driver_state_multisession_v2.py):
-  // a binary looking_road/not_looking_road classifier, used ONLY to
-  // confirm/escalate Apple Vision's own (richer) gaze classification --
-  // see combineDMDWithVision in DriverAttentionState.swift for why it
-  // can never clear a Vision-flagged distraction. nil (model unavailable
-  // or failed to load) falls back to Vision alone, never silently to
-  // "attentive."
+  // DMD-trained gaze-ZONE model (scripts/train_dmd_gaze_v3.py): 3 classes
+  // (road/brief_glance/off_road), trained on DMD's dedicated GAZE
+  // category annotations -- a real improvement over the earlier binary
+  // looking_road/not_looking_road model (which used the coarser
+  // DISTRACTION category label). Only its "off_road" probability is
+  // consumed, used ONLY to confirm/escalate Apple Vision's own (richer,
+  // directional) gaze classification -- see combineDMDWithVision in
+  // DriverAttentionState.swift for why it can never clear a Vision-
+  // flagged distraction. nil (model unavailable or failed to load)
+  // falls back to Vision alone, never silently to "attentive."
+  //
+  // Head-only trained (classifier layer only, backbone frozen) --
+  // deliberately NOT fine-tuning deeper layers like the earlier binary
+  // model did: that approach overfit badly on this dataset's small,
+  // low-diversity-per-driver calibration clips (held-out accuracy
+  // collapsed to 0.345, off_road recall 0.023) before this head-only
+  // recipe was found to generalize far better (0.560 accuracy, 0.452
+  // off_road recall) -- see docs/FINAL_MULTIMODAL_RESULTS.md for both
+  // numbers, a genuine dataset-specific finding, not a general rule.
   private let dmdAttentionModel: DMDAttentionModel? = {
     let config = MLModelConfiguration()
     return try? DMDAttentionModel(configuration: config)
@@ -643,19 +655,31 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       gaze: combinedGaze
     )
     // DMD's own training frames come from DMD's dedicated face-facing
-    // "rgb_face" camera stream (scripts/extract_dmd_frames_multisession.py),
-    // not a software crop of a wider scene -- the iPhone's front
-    // (selfie) camera is the same kind of driver-facing view, so the
-    // FULL pixelBuffer is passed here, matching training distribution,
-    // rather than cropping to Vision's face bounding box.
-    var dmdNotLookingRoadProb: Double?
+    // "rgb_face" camera stream, not a software crop of a wider scene --
+    // the iPhone's front (selfie) camera is the same kind of driver-
+    // facing view, so the FULL pixelBuffer is passed here, matching
+    // training distribution, rather than cropping to Vision's face
+    // bounding box.
+    //
+    // DMDAttentionModel is now the 3-class gaze-ZONE model
+    // (scripts/train_dmd_gaze_v3.py, trained on DMD's dedicated GAZE
+    // category annotations: road/brief_glance/off_road), replacing the
+    // earlier binary not_looking_road model. Only the "off_road"
+    // probability feeds `combineDMDWithVision` below, deliberately NOT
+    // "brief_glance" -- a mirror/instrument-cluster glance is legitimate
+    // driving behavior and must not push toward a distraction escalation
+    // the way a genuine off-road reading should. "brief_glance"'s own
+    // probability is real model output but not yet consumed anywhere;
+    // see docs/FINAL_MULTIMODAL_RESULTS.md for why the richer 3-class
+    // signal is only partially used so far.
+    var dmdOffRoadProb: Double?
     if let model = dmdAttentionModel,
       let prediction = try? model.prediction(image: pixelBuffer)
     {
-      dmdNotLookingRoadProb = prediction.classLabel_probs["not_looking_road"]
+      dmdOffRoadProb = prediction.classLabel_probs["off_road"]
     }
     let instantaneous = combineDMDWithVision(
-      visionState: visionInstantaneous, dmdNotLookingRoadProb: dmdNotLookingRoadProb
+      visionState: visionInstantaneous, dmdNotLookingRoadProb: dmdOffRoadProb
     )
     let committed = attentionHysteresis.update(instantaneous: instantaneous, now: now)
     Task { @MainActor in

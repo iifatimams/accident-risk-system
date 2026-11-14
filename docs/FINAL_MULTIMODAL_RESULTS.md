@@ -160,24 +160,124 @@ Verification: `xcodebuild` (iphonesimulator) -> BUILD SUCCEEDED. `swift test` ->
 | Dataset | Trained artifact | Feeds into |
 |---|---|---|
 | POLIDriving (14 features: speed, rpm, acceleration, throttle, engine temp/load, heart rate, weather, visibility, precipitation, accident history, design speed, hour) | `FusionModel.mlpackage` (current risk, pre-existing) + `PolidrivingFiveSecondModel.mlpackage` (5s-ahead, NEW this sprint) | `RoadSenseOnDeviceRiskEngine` -> `MultimodalRiskFusion`'s vehicle dimension + separate 5s-ahead output |
-| DMD (dedicated in-cabin `rgb_face` camera frames, `gaze_on_road` label) | `DMDAttentionModel.mlpackage` (NEW this sprint) | `VisionManager.processDriverFace` -> `combineDMDWithVision` -> `AttentionHysteresis` -> `MultimodalRiskFusion`'s attention dimension |
+| DMD GAZE category (dedicated in-cabin `rgb_face` camera frames, `gaze_zone/*` OpenLABEL annotations: road/front_right/mirrors/left/right/infotainment/steering_wheel) | `DMDAttentionModel.mlpackage` (REPLACED post-sprint -- see section 7; was previously trained on the DISTRACTION category's coarser binary `gaze_on_road` label) | `VisionManager.processDriverFace` -> `combineDMDWithVision` (off_road probability only) -> `AttentionHysteresis` -> `MultimodalRiskFusion`'s attention dimension |
 | BDD100K (10,000 val / 70,000 train dashcam images, box2d annotations) | benchmarked (pretrained COCO detector, n=40) but NOT exported/deployed this sprint | not currently in the live pipeline -- the pre-existing crude heuristic still feeds `TemporalTracker`/road-hazard evidence |
 | VZCrash (g-sensor/gyro event clips, crash/near_miss/normal labels) | `VZCrashModel.mlpackage` (pre-existing, reused) | `classifyCollisionEvidence` -> `CollisionIncidentStore` (collision-support evidence only) + a supporting gate inside `RiskFusionHeuristics`' false-positive suppression (never the predictive score's magnitude) |
 
-## 6. Reproducibility commands
+## 7. Post-sprint: real eye-gaze estimation (not just head pose)
+
+The directive's own worked example: a driver can hold their head level
+and only move their eyes -- e.g. a phone held below the steering wheel
+-- which pure head-pose classification (pitch/yaw/roll) cannot see at
+all. The project's own code had already documented this as a known,
+unfixed limitation before this pass.
+
+### 7.1 Pupil-based eye-gaze offset (DONE, real, unit-tested)
+
+Added `GazeOffset`/`gazeOffset(...)`/`averageGazeOffset(...)` to
+`DriverAttentionState.swift`: computes where the pupil sits inside its
+own eye's bounding box, using Vision's EXISTING `leftPupil`/`rightPupil`
++ `leftEye`/`rightEye` landmarks (no new Vision request -- these were
+already being requested for the eye-closure/EAR calculation). Returns
+nil, never a fabricated reading, when either eye's landmarks aren't
+reliably found that frame.
+
+`classifyGaze` now checks this eye-gaze signal BEFORE head pitch: a
+confident downward pupil offset overrides an otherwise-"attentive" head
+pose, which is exactly the below-the-wheel-phone case. 9 new unit tests
+cover this directly, including `testEyesCastDownWithLevelHeadIsCaughtByGazeAlone`
+-- the literal worked example, written as a test. Wired into
+`BackgroundCaptureService.processDriverFace` via a `gazeOffsetFromLandmarks`
+bridge. Horizontal pupil offset is computed but not yet used to override
+yaw (left/right head turns were already covered by yaw alone, and there
+is no labeled dataset in this environment to validate a horizontal
+override threshold the way DMD's gaze-zone data at least approximates
+for vertical).
+
+### 7.2 DMD gaze-zone model: a real failure, then a real success (DONE)
+
+Inspected DMD's actual GAZE category (not the DISTRACTION category the
+earlier model used) and found a genuinely richer 9-zone taxonomy per
+OpenLABEL annotation: `gaze_zone/front`, `/front_right`, `/left_mirror`,
+`/center_mirror`, `/right_mirror`, `/left`, `/right`, `/infotainment`,
+`/steering_wheel`, `/not_valid` -- where `steering_wheel` is DMD's own
+real ground truth for almost exactly the directive's phone-below-the-
+wheel example. Built a 3-class mapping (road / brief_glance [mirrors +
+front_right] / off_road [left, right, infotainment, steering_wheel]),
+extracted from each driver's "s6" calibration session
+(`scripts/extract_dmd_gaze_frames.py`).
+
+**First attempt (fine-tune the last 2 backbone blocks, the same recipe
+that improved the earlier binary model from 0.301->0.419 recall)
+OVERFIT badly**: held-out-driver accuracy 0.345, off_road recall
+**0.023** -- barely above random for 3 classes. Each driver's gaze
+session is one short, scripted calibration clip with little visual
+diversity, so fine-tuning real conv weights on only 4 such clips
+memorized driver-specific appearance, not the general gaze concept.
+
+**Second attempt (head-only: freeze the backbone entirely, train only
+the final linear layer) generalized far better**: held-out accuracy
+**0.560**, off_road recall **0.452**, off_road precision 0.824. This is
+the OPPOSITE lesson from the binary-model improvement (there, deeper
+fine-tuning helped) -- a real, measured, dataset-specific finding, not
+a general rule. The head-only model is what's deployed
+(`ios/RoadSense/Models/DMDAttentionModel.mlpackage`, replacing the
+earlier binary model), feeding its `off_road` probability -- deliberately
+NOT `brief_glance`, which is legitimate driving behavior, not distraction
+evidence -- into the existing `combineDMDWithVision` combiner.
+
+### 7.3 Off-road-gaze duration and severity (DONE)
+
+Added `offRoadGazeSec` (mirrors the existing `eyesClosedSec` pattern):
+counts only while the COMMITTED, post-hysteresis attention state is a
+CONFIRMED off-road state, excluding `faceNotDetected`/`uncertain` (a
+confidence problem, never escalated into distraction severity).
+`MultimodalRiskFusion`'s attention-dimension value now scales with a
+duration-based multiplier (capped at 2x over 5 seconds), so a
+distraction sustained for several seconds reads as more severe than one
+that just started. Added to `SensorFrame`'s wire format and the
+dashboard's `risk_breakdown` payload.
+
+### 7.4 Portrait/landscape orientation -- re-examined, not a bug
+
+Checked whether Vision's `orientation: .up` in the face-processing
+requests was wrong for landscape mounting. It is NOT: the AVCapture
+connection's `videoRotationAngle` (Phase 1 work) already rotates the
+delivered pixel buffer to upright BEFORE it reaches Vision, so `.up` is
+the correct assumption given that pre-rotation. The genuinely unverified
+part -- whether `CameraOrientation.swift`'s rotation-angle math itself
+is correct for both cameras in landscape -- was already flagged as
+unverified-on-hardware in `CAPSTONE_DELIVERY.md` and remains so; nothing
+new was found or fixed here, and no false "fix" was made.
+
+### 7.5 Not done this pass (no fabricated completion claims)
+
+- Individual driver/phone-mount calibration (a dedicated calibration UI
+  or flow) -- not implemented.
+- Sunglasses-specific handling -- no new logic; the existing confidence
+  threshold (`.uncertain` below a minimum detection confidence) is the
+  only defense, not something specific to sunglasses.
+- Horizontal pupil-offset override for yaw -- computed, not yet used
+  (7.1).
+- `brief_glance` probability from the new DMD model -- real model
+  output, not yet consumed anywhere in the fusion logic.
+- No physical-device verification of any of the above -- confirmed via
+  `xcodebuild` (compile/link) and the Python-side held-out-driver
+  metrics only.
+
+## 8. Reproducibility commands
 
 ```sh
 # POLIDriving 5-second-ahead training
 .venv/bin/python scripts/train_polidriving_5s_ahead.py
 
-# DMD v2 training + export
-.venv/bin/python scripts/train_driver_state_multisession_v2.py
-.venv/bin/python scripts/export_dmd_attention_coreml.py
+# DMD gaze-zone model (current, deployed)
+.venv/bin/python scripts/extract_dmd_gaze_frames.py
+.venv/bin/python scripts/train_dmd_gaze_v3.py
+.venv/bin/python scripts/export_dmd_gaze_coreml.py
 
-# BDD100K fine-tune attempt + honest before/after comparison (NOT deployed)
-.venv/bin/python scripts/extract_bdd100k_train_sample.py
-.venv/bin/python scripts/finetune_bdd100k_detector.py
-.venv/bin/python scripts/eval_bdd100k_finetuned.py
+# Road-object detector (YOLOv8n)
+.venv/bin/python scripts/export_yolo_road_detector.py
 
 # Full verification
 cd ios && swift test
