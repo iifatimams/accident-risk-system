@@ -22,5 +22,9 @@ artifacts/*
 # Local hardware recordings (GPS and wearable data)
 /data/recordings/
 
+# Generated synthetic MetaDrive frames/telemetry (synthetic_data/generate_scenarios.py);
+# reproducible from the generator, never evidence of real-world performance.
+/data/synthetic/
+
 # Swift package build output (never source or test evidence)
 /ios/.build/
