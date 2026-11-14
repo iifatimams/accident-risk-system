@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreLocation
+import CoreML
 import CoreMotion
 import Foundation
 import UIKit
@@ -8,6 +9,17 @@ import Vision
 // MARK: - Vision Manager (7-Factor Multimodal Tracking)
 public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate
 {
+  // DMD-trained driver-attention model (scripts/train_driver_state_multisession_v2.py):
+  // a binary looking_road/not_looking_road classifier, used ONLY to
+  // confirm/escalate Apple Vision's own (richer) gaze classification --
+  // see combineDMDWithVision in DriverAttentionState.swift for why it
+  // can never clear a Vision-flagged distraction. nil (model unavailable
+  // or failed to load) falls back to Vision alone, never silently to
+  // "attentive."
+  private let dmdAttentionModel: DMDAttentionModel? = {
+    let config = MLModelConfiguration()
+    return try? DMDAttentionModel(configuration: config)
+  }()
   @Published public var eyesClosedSec: Double = 0.0
   @Published public var eyesOnRoad: Bool = true
   @Published public var postureCollapse: Bool = false
@@ -550,13 +562,28 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     )
     let avgEAR = (leftEAR + rightEAR) / 2.0
     let isEyesClosed = avgEAR < GazeThresholds.default.earClosed
-    let instantaneous = classifyGaze(
+    let visionInstantaneous = classifyGaze(
       pitch: pitch,
       yaw: yaw,
       roll: roll,
       eyeAspectRatio: avgEAR,
       faceDetected: true,
       confidence: face.confidence
+    )
+    // DMD's own training frames come from DMD's dedicated face-facing
+    // "rgb_face" camera stream (scripts/extract_dmd_frames_multisession.py),
+    // not a software crop of a wider scene -- the iPhone's front
+    // (selfie) camera is the same kind of driver-facing view, so the
+    // FULL pixelBuffer is passed here, matching training distribution,
+    // rather than cropping to Vision's face bounding box.
+    var dmdNotLookingRoadProb: Double?
+    if let model = dmdAttentionModel,
+      let prediction = try? model.prediction(image: pixelBuffer)
+    {
+      dmdNotLookingRoadProb = prediction.classLabel_probs["not_looking_road"]
+    }
+    let instantaneous = combineDMDWithVision(
+      visionState: visionInstantaneous, dmdNotLookingRoadProb: dmdNotLookingRoadProb
     )
     let committed = attentionHysteresis.update(instantaneous: instantaneous, now: now)
     Task { @MainActor in

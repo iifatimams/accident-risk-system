@@ -12,10 +12,17 @@ artifacts/dmd_attention/model.pt + classes.json.
 import json
 from pathlib import Path
 
-import coremltools as ct
 import torch
 from torch import nn
 from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
+
+# Imported AFTER torch/torchvision deliberately -- importing coremltools
+# first caused a reproducible segfault (exit 139) during ct.convert when
+# this script ran standalone, which did NOT reproduce when the identical
+# logic ran as an inline `python -c` snippet with torch imported first.
+# A known class of macOS/Accelerate-framework library-init-order issue
+# between coremltools and torch; import order is the fix, not the logic.
+import coremltools as ct
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHECKPOINT_DIR = REPO_ROOT / "artifacts/dmd_attention"
