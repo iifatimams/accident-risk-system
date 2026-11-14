@@ -1,5 +1,15 @@
 # RoadSense final multimodal architecture -- results
 
+**Post-sprint update**: after reviewing section 3 below, the fake
+"car"-classification + traffic-density counting was REMOVED from the
+live code (not just left undeployed), the BDD100K dataset and every
+BDD100K-only script were deleted, and the pretrained-COCO-detector
+Core-ML-export line was also dropped in favor of a different candidate
+(YOLO/Ultralytics) still pending a package-install approval -- see the
+bottom of section 3 for exactly what changed and why. Section 3's
+original text is left intact below as the honest record of what was
+tried first and why it didn't work.
+
 Written at the end of an urgent, time-boxed sprint implementing the
 two-pipeline multimodal architecture (Pipeline A: 5-second predictive
 risk fusion from POLIDriving + DMD + BDD100K; Pipeline B: independent
@@ -114,7 +124,17 @@ Fine-tuned a Faster R-CNN MobileNetV3-320-FPN (COCO-pretrained backbone, frozen;
 
 Separately, exporting the two-stage Faster R-CNN to Core ML was attempted and failed immediately and reproducibly: `torch.jit.trace` on the full detection model raises `RuntimeError: Only tensors, lists, tuples of tensors, or dictionary of tensors can be output from traced functions` -- detection models return a list of per-image result dicts, which `torch.jit.trace` fundamentally cannot capture. This is a well-documented limitation of multi-stage detectors with PyTorch tracing/`coremltools`, not something more time alone (within this session's remaining budget) would resolve without substantial custom export engineering (splitting backbone/RPN/ROI-head export, a hand-written NMS layer, etc.).
 
-**Conclusion: the rear-camera pipeline is UNCHANGED this sprint.** It still uses the pre-existing crude rectangle-aspect-ratio heuristic for vehicle density, and Apple's own `VNDetectHumanRectanglesRequest` for pedestrians (both pre-existing, documented in `CAPSTONE_DELIVERY.md` section 6). No BDD100K-trained or BDD100K-benchmarked model is deployed to the live rear-camera pipeline. `TemporalTracker`/`ForwardCollisionHazard`/`PedestrianHazard` still run on top of that existing heuristic's output, unchanged.
+**Conclusion at the time this was written: the rear-camera pipeline is UNCHANGED this sprint.** It still uses the pre-existing crude rectangle-aspect-ratio heuristic for vehicle density, and Apple's own `VNDetectHumanRectanglesRequest` for pedestrians (both pre-existing, documented in `CAPSTONE_DELIVERY.md` section 6). No BDD100K-trained or BDD100K-benchmarked model is deployed to the live rear-camera pipeline. `TemporalTracker`/`ForwardCollisionHazard`/`PedestrianHazard` still run on top of that existing heuristic's output, unchanged.
+
+### 3.3 Post-sprint: the fake part removed, the real part kept, dataset deleted
+
+After reviewing 3.1/3.2, decided the "is this rectangle specifically a car" classification and the traffic-density bucket it fed (empty/light/moderate/crowded) were fabricating a signal -- a generic rectangle finder has no actual evidence a box is a vehicle rather than a sign, a shadow, or a building. That classification and the traffic-density counter were **removed from `BackgroundCaptureService.processRoadTraffic`** (the `switch carRects.count` bucketing block, and the `classLabel: "car"` label on tracked boxes, now `"object"`).
+
+What was KEPT, because it is a genuinely different and more defensible claim: tracking a detected rectangle over time and checking whether it is growing in the frame (`ForwardCollisionHazard.swift`'s optical-expansion/time-to-contact math) does not need to know the object's class -- only that something ahead is getting bigger, i.e. closing in. That logic, and the `TemporalTracker`-based lead-object tracking feeding it, is unchanged and still live. `trafficLevel`/`traffic_level` is left in the `SensorFrame` schema (for backward wire-protocol compatibility) but is no longer computed from anything -- it simply stays at its default (`"empty"`), which is now an honest "no signal," not a fabricated one.
+
+Also deleted: the downloaded BDD100K dataset (`data/raw/bdd100k/`, ~5.7GB of zips), its extracted frame samples (`data/interim/bdd100k_frames/`, `data/interim/bdd100k_frames_train_sample/`), the failed fine-tune checkpoint (`artifacts/bdd100k_detector/`), and every BDD100K-only script (`download_bdd100k.sh`, `resume_bdd_images.sh`, `benchmark_detector_bdd100k.py`, `benchmark_detector_bdd100k_ssdlite.py`, `extract_bdd100k_train_sample.py`, `finetune_bdd100k_detector.py`, `eval_bdd100k_finetuned.py`). The two benchmark docs (`docs/benchmarks/bdd100k_*.md`) are kept as the historical record of what was measured and why it wasn't deployed; they are no longer reproducible since the scripts and dataset are gone.
+
+**Still outstanding**: the request to make a REAL trained detector genuinely "part of the prediction machine learning thing" (i.e. CoreML-exported and feeding the fusion engine as a real evidence source, not a heuristic). The pretrained-COCO Faster R-CNN's Core ML export already failed (3.2) and is not the path forward. The realistic fast path is a YOLO-family model via the `ultralytics` package, which has first-class, working Core ML export (unlike torchvision's research-oriented detection models) -- but installing that package was blocked by this session's own safety review for approval, so this step is pending the user's decision (see the chat for the exact ask).
 
 ## 4. Genuinely unfinished items (no fabricated completion claims)
 
