@@ -44,6 +44,7 @@ let package = Package(
                 "Models/VZCrashModel.mlpackage",
                 "Models/PolidrivingFiveSecondModel.mlpackage",
                 "Models/DMDAttentionModel.mlpackage",
+                "Models/RoadObjectDetector.mlpackage",
                 "Models/SensorFrame.swift",
                 "Services/BackgroundCaptureService.swift",
                 // CollisionDetector.swift and CollisionIncidentStore.swift

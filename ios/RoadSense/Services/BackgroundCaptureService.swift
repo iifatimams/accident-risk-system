@@ -20,6 +20,30 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     let config = MLModelConfiguration()
     return try? DMDAttentionModel(configuration: config)
   }()
+  // Real, trained, Core-ML-deployed road-object detector (YOLOv8n,
+  // COCO-pretrained via the `ultralytics` package's own Core ML export
+  // path -- the project's original BDD100K-fine-tune attempt regressed
+  // vs. the pretrained baseline and was abandoned; the earlier pretrained
+  // torchvision Faster R-CNN could not be exported to Core ML at all.
+  // This one verified correctly on a real test image before being
+  // bundled here: a bus + 4 people photo returned class 5/"bus" at 0.92
+  // confidence and 4 class-0/"person" detections at 0.37-0.85 -- see
+  // docs/FINAL_MULTIMODAL_RESULTS.md for the exact command). Wrapped as
+  // VNCoreMLModel (not the generated Swift class) because Vision handles
+  // this model's image resize/NMS-threshold inputs automatically.
+  private let roadObjectDetector: VNCoreMLModel? = {
+    let config = MLModelConfiguration()
+    guard let model = try? RoadObjectDetector(configuration: config) else {
+      return nil
+    }
+    return try? VNCoreMLModel(for: model.model)
+  }()
+  // COCO class names this project treats as "a vehicle ahead" evidence
+  // for lead-object tracking -- deliberately excludes "person" (the
+  // existing, separately-validated VNDetectHumanRectanglesRequest
+  // pipeline already owns pedestrian detection) and non-road COCO
+  // classes the model can also emit.
+  private static let vehicleClassLabels: Set<String> = ["car", "truck", "bus", "motorcycle", "bicycle", "train"]
   @Published public var eyesClosedSec: Double = 0.0
   @Published public var eyesOnRoad: Bool = true
   @Published public var postureCollapse: Bool = false
@@ -613,58 +637,53 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   private func processRoadTraffic(
     _ pixelBuffer: CVPixelBuffer
   ) {
-    // Generic-rectangle "is this specifically a car" classification and
-    // the traffic-density bucket it fed (empty/light/moderate/crowded)
-    // were removed: a generic rectangle finder has no idea whether a box
-    // is a car, a sign, a building, or a shadow, so counting "car-shaped"
-    // boxes and calling it traffic density was fabricating a signal that
-    // was never actually measuring anything (see
-    // docs/FINAL_MULTIMODAL_RESULTS.md). What IS kept, because it's a
-    // genuinely different and more defensible claim: tracking whatever
-    // rectangle is found and checking whether IT is growing in the frame
-    // (ForwardCollisionHazard.swift's optical-expansion/time-to-contact
-    // math) is a real, class-agnostic "is something ahead closing in on
-    // us" signal -- it doesn't need to know the object's identity, only
-    // that it's getting bigger. Object identity remains unlabeled
-    // ("object", not "car") since that part genuinely isn't known.
-    let objectRequest = VNDetectRectanglesRequest {
-      [weak self] req, _ in
-      guard let self = self else {
-        return
-      }
-      let results =
-        req.results as? [VNRectangleObservation] ?? []
-      Task { @MainActor in
-        let candidateRects = results.filter {
-          $0.boundingBox.height > 0
-            && ($0.boundingBox.width
-              / $0.boundingBox.height) > 1.2
+    // Real, trained object detector (roadObjectDetector, a Core-ML-
+    // exported YOLOv8n -- see its own doc comment above for how it was
+    // verified). Replaces the previous generic-rectangle "is this
+    // specifically a car" guess, which had no actual evidence a box was
+    // a vehicle rather than a sign, a building, or a shadow -- that
+    // fabricated the traffic-density signal removed earlier (see
+    // docs/FINAL_MULTIMODAL_RESULTS.md). Only vehicle-class detections
+    // feed the lead-object tracker; pedestrians stay on the existing,
+    // separately-validated VNDetectHumanRectanglesRequest below.
+    var objectRequest: VNCoreMLRequest?
+    if let detectorModel = roadObjectDetector {
+      let request = VNCoreMLRequest(model: detectorModel) {
+        [weak self] req, _ in
+        guard let self = self else {
+          return
         }
-        // Phase 5/6: track rectangle candidates across frames and surface
-        // the largest one as the lead-object candidate. These are still
-        // generic rectangles, not a validated detector -- which is
-        // exactly why classification into an actual hazard verdict
-        // (ForwardCollisionHazard.swift, applied in sendCurrentSnapshot)
-        // stays conservative rather than trusting this track's identity.
-        let detections = candidateRects.map {
-          Detection(
-            classLabel: "object",
-            box: NormalizedRect(
-              x: $0.boundingBox.origin.x, y: $0.boundingBox.origin.y,
-              width: $0.boundingBox.width, height: $0.boundingBox.height
-            ),
-            confidence: $0.confidence
+        let results =
+          req.results as? [VNRecognizedObjectObservation] ?? []
+        Task { @MainActor in
+          let vehicleDetections = results.compactMap { observation -> Detection? in
+            guard let topLabel = observation.labels.first,
+              Self.vehicleClassLabels.contains(topLabel.identifier)
+            else {
+              return nil
+            }
+            return Detection(
+              classLabel: topLabel.identifier,
+              box: NormalizedRect(
+                x: observation.boundingBox.origin.x, y: observation.boundingBox.origin.y,
+                width: observation.boundingBox.width, height: observation.boundingBox.height
+              ),
+              confidence: topLabel.confidence
+            )
+          }
+          let tracks = self.vehicleTracker.update(
+            detections: vehicleDetections, at: Date().timeIntervalSince1970
           )
+          self.leadTrack = tracks.filter { Self.vehicleClassLabels.contains($0.classLabel) }
+            .max { $0.box.area < $1.box.area }
         }
-        let tracks = self.vehicleTracker.update(
-          detections: detections, at: Date().timeIntervalSince1970
-        )
-        self.leadTrack = tracks.filter { $0.classLabel == "object" }
-          .max { $0.box.area < $1.box.area }
       }
+      // .scaleFit letterboxes rather than center-cropping -- a dashcam-
+      // style wide frame has relevant vehicles near the edges that a
+      // center crop could cut off entirely.
+      request.imageCropAndScaleOption = .scaleFit
+      objectRequest = request
     }
-    objectRequest.minimumSize = 0.1
-    objectRequest.maximumObservations = 10
     // Pedestrians: unlike the car heuristic above, VNDetectHumanRectanglesRequest
     // is a real Apple-trained on-device detector, not a shape guess, so it's
     // trustworthy enough to actually factor into risk. This previously didn't
@@ -709,8 +728,12 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     if #available(iOS 15.0, *) {
       pedestrianRequest.revision = VNDetectHumanRectanglesRequestRevision2
     }
+    var requests: [VNRequest] = [pedestrianRequest]
+    if let objectRequest = objectRequest {
+      requests.append(objectRequest)
+    }
     try? VNSequenceRequestHandler().perform(
-      [objectRequest, pedestrianRequest],
+      requests,
       on: pixelBuffer,
       orientation: .up
     )

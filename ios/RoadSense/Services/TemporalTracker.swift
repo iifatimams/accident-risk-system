@@ -10,10 +10,11 @@ import Foundation
 ///
 /// KNOWN LIMITATION this does NOT fix: object permanence and consistent
 /// IDs only help if the underlying per-frame detections are themselves
-/// trustworthy. Feeding this a detector that misidentifies what a "car" is
-/// will track a consistently-wrong thing consistently -- see
-/// ForwardCollisionHazard.swift and BackgroundCaptureService.swift for how
-/// this is kept epistemically cautious given that.
+/// trustworthy. BackgroundCaptureService.swift now feeds this a real,
+/// trained detector (YOLOv8n, Core-ML-deployed) rather than the earlier
+/// generic-rectangle guess -- see ForwardCollisionHazard.swift and
+/// docs/FINAL_MULTIMODAL_RESULTS.md for exactly what was verified and
+/// what remains conservative given it's still a general-purpose model.
 
 /// A box in normalized frame coordinates (0...1), origin and axis
 /// convention matching whatever the caller's detection source uses --

@@ -19,10 +19,12 @@ import Foundation
 ///     a real approach is rarely perfectly constant, so this is a
 ///     short-horizon estimate, not a precise prediction.
 ///   - It depends entirely on the upstream detection/tracking being
-///     correct. Today's rear-camera "car" detection in
-///     BackgroundCaptureService.swift is a crude rectangle heuristic, not
-///     a validated detector (see docs/benchmarks/bdd100k_*.md) -- this is
-///     explicitly why the classifier below stays conservative
+///     correct. BackgroundCaptureService.swift now runs a real, trained,
+///     Core-ML-deployed detector (YOLOv8n) for this -- a genuine
+///     improvement over the earlier crude rectangle heuristic -- but it
+///     is still a general-purpose COCO model (not fine-tuned on driving
+///     footage specifically; see docs/FINAL_MULTIMODAL_RESULTS.md) which
+///     is explicitly why the classifier below still stays conservative
 ///     (`insufficientEvidence`/`leadObjectTracked`) rather than escalating
 ///     without strong, sustained evidence.
 public enum ForwardHazardState: Equatable {
