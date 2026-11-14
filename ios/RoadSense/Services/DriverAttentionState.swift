@@ -47,6 +47,64 @@ public enum DriverAttentionState: Equatable {
 /// below. None of these have been tuned against labeled real-world footage
 /// -- there is no such dataset available in this environment -- so they
 /// are starting points for on-device calibration, not validated values.
+/// Where the pupil sits inside the eye socket, relative to the eye's own
+/// bounding box -- a genuine EYE-GAZE signal, independent of head pose.
+/// This is what lets the system catch "phone held below the steering
+/// wheel, head relatively straight, eyes directed downward" -- the
+/// capstone directive's own example of something head-pose-only
+/// classification cannot see at all.
+///
+/// Both components are normalized by the eye's own width/height, in
+/// Vision's normalized-image coordinate convention (origin bottom-left,
+/// y increases upward) -- `vertical < 0` means the pupil sits toward the
+/// BOTTOM of the eye socket, i.e. looking down, using the same sign
+/// convention as `GazeThresholds.pitchDown` deliberately, so the two
+/// signals combine without a sign-flip bug.
+public struct GazeOffset: Equatable {
+  public var horizontal: Double
+  public var vertical: Double
+}
+
+/// Computes `GazeOffset` from one eye's pupil point and its own contour
+/// points (both in Vision's normalized image coordinates). Returns nil
+/// when the eye region is degenerate (zero width/height -- e.g. a
+/// landmark failure) rather than dividing by zero and fabricating a
+/// reading.
+public func gazeOffset(pupil: (x: Double, y: Double), eyeContour: [(x: Double, y: Double)]) -> GazeOffset? {
+  guard !eyeContour.isEmpty else {
+    return nil
+  }
+  let minX = eyeContour.map(\.x).min()!
+  let maxX = eyeContour.map(\.x).max()!
+  let minY = eyeContour.map(\.y).min()!
+  let maxY = eyeContour.map(\.y).max()!
+  let width = maxX - minX
+  let height = maxY - minY
+  guard width > 0, height > 0 else {
+    return nil
+  }
+  let centerX = (minX + maxX) / 2.0
+  let centerY = (minY + maxY) / 2.0
+  return GazeOffset(horizontal: (pupil.x - centerX) / width, vertical: (pupil.y - centerY) / height)
+}
+
+/// Averages two eyes' independently-computed offsets. Using both eyes
+/// (not just one) is more robust to a single degenerate landmark read;
+/// either eye missing still yields a usable reading from the other,
+/// rather than discarding the whole frame.
+public func averageGazeOffset(left: GazeOffset?, right: GazeOffset?) -> GazeOffset? {
+  switch (left, right) {
+  case (nil, nil):
+    return nil
+  case (let l?, nil):
+    return l
+  case (nil, let r?):
+    return r
+  case (let l?, let r?):
+    return GazeOffset(horizontal: (l.horizontal + r.horizontal) / 2.0, vertical: (l.vertical + r.vertical) / 2.0)
+  }
+}
+
 public struct GazeThresholds {
   /// Head pitched down past this (radians) reads as looking down (e.g. at a
   /// phone in the lap). Pre-existing value.
@@ -68,6 +126,12 @@ public struct GazeThresholds {
   /// (nighttime, glasses glare, partial occlusion), instead of silently
   /// trusting degraded Vision output.
   public var minConfidence: Float = 0.4
+  /// Pupil-within-eye-socket vertical offset below this reads as looking
+  /// down BY EYE GAZE ALONE, independent of head pitch -- this is the
+  /// signal that catches a phone held below the wheel while the head
+  /// stays level. A starting point, not tuned against labeled footage
+  /// (same caveat as every other threshold in this struct).
+  public var gazeVerticalDown: Double = -0.18
 
   public static let `default` = GazeThresholds()
 }
@@ -81,13 +145,19 @@ public struct GazeThresholds {
 /// "turned with eyes closed" from pose alone, and eyes-closed is the more
 /// safety-relevant state to surface).
 ///
-/// KNOWN LIMITATION (documented per project directive, not fixed here):
-/// this is head pose, not eye gaze. A driver can hold their head still and
-/// move only their eyes to look at a phone in a cupholder, and this will
-/// read `.attentive`. True gaze estimation would need pupil tracking, which
-/// is not implemented -- see docs/DEVELOPMENT_PROGRESS.md Phase 2.4. This
-/// also does not detect phone USE; `.lookingDown` means head pitch only,
-/// not a visually confirmed phone in frame.
+/// Combines head pose (pitch/yaw) with an actual eye-gaze signal (`gaze`,
+/// pupil-within-eye-socket offset -- see `GazeOffset`/`gazeOffset(...)`
+/// above) specifically so a driver who holds their head still and moves
+/// only their eyes (e.g. a phone held below the wheel) is still caught,
+/// which head-pose-only classification could not do at all. This still
+/// does not detect phone USE; `.lookingDown` means gaze/pitch evidence
+/// only, not a visually confirmed phone in frame. Only VERTICAL gaze
+/// offset is used to override head pose so far (the directive's own
+/// worked example); horizontal pupil offset is computed but not yet
+/// used to override yaw -- left/right head turns were already covered
+/// by yaw alone, and no labeled data exists in this environment to
+/// validate a horizontal override threshold the way the DMD gaze-zone
+/// dataset at least approximates for vertical.
 public func classifyGaze(
   pitch: Double,
   yaw: Double,
@@ -95,6 +165,7 @@ public func classifyGaze(
   eyeAspectRatio: Double,
   faceDetected: Bool,
   confidence: Float,
+  gaze: GazeOffset? = nil,
   thresholds: GazeThresholds = .default
 ) -> DriverAttentionState {
   guard faceDetected else {
@@ -105,6 +176,16 @@ public func classifyGaze(
   }
   if eyeAspectRatio < thresholds.earClosed {
     return .eyesClosed
+  }
+  // Eye-gaze-alone check FIRST, before head pitch: this is deliberately
+  // the path that catches a phone held below the wheel while the head
+  // stays level -- head pitch alone would read `.attentive` here, which
+  // is exactly the directive's own worked example of what NOT to miss.
+  // `gaze` is nil when pupil landmarks weren't reliably found this frame
+  // (confidence-aware: falls back to head pitch only, never fabricates
+  // an eye-gaze reading it doesn't have).
+  if let gaze = gaze, gaze.vertical < thresholds.gazeVerticalDown {
+    return .lookingDown
   }
   if pitch < thresholds.pitchDown {
     return .lookingDown

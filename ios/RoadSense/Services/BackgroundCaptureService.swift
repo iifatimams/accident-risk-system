@@ -45,6 +45,14 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   // classes the model can also emit.
   private static let vehicleClassLabels: Set<String> = ["car", "truck", "bus", "motorcycle", "bicycle", "train"]
   @Published public var eyesClosedSec: Double = 0.0
+  /// How long the COMMITTED (post-hysteresis) attention state has been
+  /// continuously off-road -- i.e. this only starts counting once a
+  /// brief glance has already been filtered out by AttentionHysteresis's
+  /// own dwell time, so a mirror check never shows up here at all. Feeds
+  /// MultimodalRiskFusion's attention-dimension severity/confidence
+  /// (duration of sustained off-road gaze, not just its current
+  /// instantaneous state).
+  @Published public var offRoadGazeSec: Double = 0.0
   @Published public var eyesOnRoad: Bool = true
   @Published public var postureCollapse: Bool = false
   @Published public var fixedGaze: Bool = false
@@ -114,6 +122,7 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   private var frontConnection: AVCaptureConnection?
   private var backConnection: AVCaptureConnection?
   private var eyesClosedStart: Date?
+  private var offRoadGazeStart: Date?
   private var fixedGazeStart: Date?
   private var lastPitch: Double = 0.0
   private var lastYaw: Double = 0.0
@@ -246,8 +255,10 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     attentionHysteresis = AttentionHysteresis(enterDwell: attentionHysteresis.enterDwell, exitDwell: attentionHysteresis.exitDwell)
     Task { @MainActor in
       self.eyesClosedStart = nil
+      self.offRoadGazeStart = nil
       self.fixedGazeStart = nil
       self.eyesClosedSec = 0.0
+      self.offRoadGazeSec = 0.0
       self.eyesOnRoad = true
       self.attentionState = .attentive
     }
@@ -259,6 +270,7 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     multiCamSession = nil
     attentionHysteresis = AttentionHysteresis(enterDwell: attentionHysteresis.enterDwell, exitDwell: attentionHysteresis.exitDwell)
     eyesClosedStart = nil
+    offRoadGazeStart = nil
     fixedGazeStart = nil
     frontFrameTimestamps.removeAll()
     backFrameTimestamps.removeAll()
@@ -268,6 +280,7 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       self.eyesOnRoad = true
       self.attentionState = .attentive
       self.eyesClosedSec = 0.0
+      self.offRoadGazeSec = 0.0
       self.postureCollapse = false
       self.fixedGaze = false
       self.trafficLevel = "empty"
@@ -505,6 +518,26 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
     return height / width
   }
+  /// Bridges Vision's `VNFaceLandmarkRegion2D` (CGPoint-based) to
+  /// DriverAttentionState.swift's pure, Foundation-only `gazeOffset(...)`
+  /// (which can't import Vision -- see that file's own testability
+  /// rationale). nil when either the pupil or the eye-contour region is
+  /// missing this frame; Vision's pupil region, when present, is a
+  /// single point, so `.first` is the pupil location, not an arbitrary
+  /// choice among several.
+  private static func gazeOffsetFromLandmarks(
+    pupil: VNFaceLandmarkRegion2D?, eye: VNFaceLandmarkRegion2D?
+  ) -> GazeOffset? {
+    guard let pupilPoint = pupil?.normalizedPoints.first,
+      let eyePoints = eye?.normalizedPoints, !eyePoints.isEmpty
+    else {
+      return nil
+    }
+    return gazeOffset(
+      pupil: (x: Double(pupilPoint.x), y: Double(pupilPoint.y)),
+      eyeContour: eyePoints.map { (x: Double($0.x), y: Double($0.y)) }
+    )
+  }
   // MARK: Driver Face Tracking
   private func processDriverFace(
     _ pixelBuffer: CVPixelBuffer
@@ -553,6 +586,12 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         self.debugFaceDetected = false
         self.eyesClosedStart = nil
         self.eyesClosedSec = 0.0
+        // A genuinely missing face is a CONFIDENCE problem, not a
+        // confirmed-distraction one -- never let it grow the off-road-
+        // gaze severity duration (see the matching comment in the
+        // face-detected path below).
+        self.offRoadGazeStart = nil
+        self.offRoadGazeSec = 0.0
         self.postureCollapse = false
         self.attentionState = committed
         self.eyesOnRoad = committed.isEyesOnRoad
@@ -586,13 +625,22 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     )
     let avgEAR = (leftEAR + rightEAR) / 2.0
     let isEyesClosed = avgEAR < GazeThresholds.default.earClosed
+    // Eye-gaze-by-pupil-position (DriverAttentionState.swift's GazeOffset)
+    // -- genuinely independent of head pose, so it catches "phone held
+    // below the wheel, head level" the way pitch alone cannot. nil when
+    // either eye's pupil/contour landmarks weren't reliably found this
+    // frame (e.g. a blink, poor lighting), not fabricated.
+    let leftGaze = Self.gazeOffsetFromLandmarks(pupil: face.landmarks?.leftPupil, eye: face.landmarks?.leftEye)
+    let rightGaze = Self.gazeOffsetFromLandmarks(pupil: face.landmarks?.rightPupil, eye: face.landmarks?.rightEye)
+    let combinedGaze = averageGazeOffset(left: leftGaze, right: rightGaze)
     let visionInstantaneous = classifyGaze(
       pitch: pitch,
       yaw: yaw,
       roll: roll,
       eyeAspectRatio: avgEAR,
       faceDetected: true,
-      confidence: face.confidence
+      confidence: face.confidence,
+      gaze: combinedGaze
     )
     // DMD's own training frames come from DMD's dedicated face-facing
     // "rgb_face" camera stream (scripts/extract_dmd_frames_multisession.py),
@@ -630,6 +678,24 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       } else {
         self.eyesClosedStart = nil
         self.eyesClosedSec = 0.0
+      }
+      // Deliberately excludes .faceNotDetected/.uncertain: those mean "we
+      // don't know where the driver is looking," which must stay a
+      // CONFIDENCE problem (handled separately, via roadEvidenceFresh-
+      // style confidence weighting in sendCurrentSnapshot/MultimodalRiskFusion),
+      // never escalated into a growing distraction-SEVERITY duration the
+      // way a confirmed lookingDown/lookingLeft/etc. state is.
+      let isConfirmedOffRoad = !committed.isEyesOnRoad && committed != .faceNotDetected && committed != .uncertain
+      if isConfirmedOffRoad {
+        if self.offRoadGazeStart == nil {
+          self.offRoadGazeStart = Date()
+        }
+        if let start = self.offRoadGazeStart {
+          self.offRoadGazeSec = Date().timeIntervalSince(start)
+        }
+      } else {
+        self.offRoadGazeStart = nil
+        self.offRoadGazeSec = 0.0
       }
     }
   }
@@ -992,6 +1058,8 @@ public class BackgroundCaptureService:
           self.visionManager.attentionState.payloadValue
         snapshot.eyesClosedSec =
           self.visionManager.eyesClosedSec
+        snapshot.offRoadGazeSec =
+          self.visionManager.offRoadGazeSec
         snapshot.postureCollapse =
           self.visionManager.postureCollapse
         snapshot.fixedGaze =
@@ -1167,8 +1235,16 @@ public class BackgroundCaptureService:
         confidence: measuredSpeedMps != nil ? 1.0 : 0.4
       )
       let lowConfidenceAttentionStates: Set<String> = ["face_not_detected", "uncertain"]
+      // Severity ramps with how long the gaze has been SUSTAINED off-road
+      // (offRoadGazeSec, which already excludes brief hysteresis-filtered
+      // glances and the face_not_detected/uncertain confidence case) --
+      // a distraction that has lasted 4 seconds is more severe than one
+      // that just started, which the previous instantaneous-only penalty
+      // could not express. Capped at 2x so persistence alone can't run
+      // away unboundedly.
+      let offRoadSeverityMultiplier = 1.0 + min(1.0, snapshot.offRoadGazeSec / 5.0)
       let attentionEvidence = ModalityEvidence(
-        value: breakdown.eyesClosedPenalty + breakdown.attentionPenalty,
+        value: (breakdown.eyesClosedPenalty + breakdown.attentionPenalty) * offRoadSeverityMultiplier,
         confidence: lowConfidenceAttentionStates.contains(snapshot.attentionState) ? 0.2 : 1.0
       )
       let noRoadEvidenceStates: Set<String> = ["no_relevant_lead_object", "insufficient_evidence"]
@@ -1203,6 +1279,7 @@ public class BackgroundCaptureService:
           "false_positive_suppression_applied": breakdown.falsePositiveSuppressionApplied,
           "hard_override_applied": breakdown.hardOverrideApplied,
           "collision_support_evidence": breakdown.collisionSupportEvidence,
+          "off_road_gaze_sec": snapshot.offRoadGazeSec,
         ]
         payload["multimodal_risk"] = [
           "current_risk": multimodalEstimate.currentRisk,

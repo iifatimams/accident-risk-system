@@ -69,6 +69,77 @@ final class ClassifyGazeTests: XCTestCase {
             .attentive
         )
     }
+
+    /// The exact worked example from the capstone directive: head level
+    /// (pitch == 0, would read .attentive on pose alone), but the eyes
+    /// are cast down -- e.g. a phone held below the steering wheel.
+    func testEyesCastDownWithLevelHeadIsCaughtByGazeAlone() {
+        let lookingDown = GazeOffset(horizontal: 0.0, vertical: -0.3)
+        XCTAssertEqual(
+            classifyGaze(pitch: 0.0, yaw: 0.0, roll: 0.0, eyeAspectRatio: 0.3, faceDetected: true, confidence: 0.9, gaze: lookingDown),
+            .lookingDown,
+            "head pitch alone says attentive, but the eyes are actually looking down -- must not be missed"
+        )
+    }
+
+    func testSmallGazeOffsetWithLevelHeadStaysAttentive() {
+        let slight = GazeOffset(horizontal: 0.02, vertical: -0.05)
+        XCTAssertEqual(
+            classifyGaze(pitch: 0.0, yaw: 0.0, roll: 0.0, eyeAspectRatio: 0.3, faceDetected: true, confidence: 0.9, gaze: slight),
+            .attentive
+        )
+    }
+
+    func testMissingGazeOffsetFallsBackToHeadPoseOnly() {
+        XCTAssertEqual(
+            classifyGaze(pitch: 0.0, yaw: 0.0, roll: 0.0, eyeAspectRatio: 0.3, faceDetected: true, confidence: 0.9, gaze: nil),
+            .attentive
+        )
+    }
+}
+
+final class GazeOffsetTests: XCTestCase {
+    func testPupilBelowEyeCenterReadsAsNegativeVertical() {
+        let eye = [(x: 0.0, y: 0.0), (x: 1.0, y: 0.0), (x: 1.0, y: 1.0), (x: 0.0, y: 1.0)]  // center (0.5, 0.5)
+        let offset = gazeOffset(pupil: (x: 0.5, y: 0.2), eyeContour: eye)
+        XCTAssertNotNil(offset)
+        XCTAssertLessThan(offset!.vertical, 0, "pupil below center must read as looking down (negative)")
+    }
+
+    func testPupilAboveEyeCenterReadsAsPositiveVertical() {
+        let eye = [(x: 0.0, y: 0.0), (x: 1.0, y: 0.0), (x: 1.0, y: 1.0), (x: 0.0, y: 1.0)]
+        let offset = gazeOffset(pupil: (x: 0.5, y: 0.8), eyeContour: eye)
+        XCTAssertNotNil(offset)
+        XCTAssertGreaterThan(offset!.vertical, 0)
+    }
+
+    func testCenteredPupilIsZeroOffset() {
+        let eye = [(x: 0.0, y: 0.0), (x: 1.0, y: 0.0), (x: 1.0, y: 1.0), (x: 0.0, y: 1.0)]
+        let offset = gazeOffset(pupil: (x: 0.5, y: 0.5), eyeContour: eye)
+        XCTAssertEqual(offset?.horizontal ?? -1, 0, accuracy: 1e-9)
+        XCTAssertEqual(offset?.vertical ?? -1, 0, accuracy: 1e-9)
+    }
+
+    func testDegenerateEyeContourReturnsNilNotAFabricatedReading() {
+        XCTAssertNil(gazeOffset(pupil: (x: 0.5, y: 0.5), eyeContour: []))
+        let zeroWidth = [(x: 0.5, y: 0.0), (x: 0.5, y: 1.0)]  // zero width
+        XCTAssertNil(gazeOffset(pupil: (x: 0.5, y: 0.5), eyeContour: zeroWidth))
+    }
+
+    func testAverageGazeOffsetCombinesBothEyes() {
+        let left = GazeOffset(horizontal: -0.1, vertical: -0.2)
+        let right = GazeOffset(horizontal: 0.1, vertical: -0.2)
+        let averaged = averageGazeOffset(left: left, right: right)
+        XCTAssertEqual(averaged?.horizontal ?? 99, 0.0, accuracy: 1e-9)
+        XCTAssertEqual(averaged?.vertical ?? 99, -0.2, accuracy: 1e-9)
+    }
+
+    func testAverageGazeOffsetFallsBackToWhicheverEyeIsAvailable() {
+        let right = GazeOffset(horizontal: 0.1, vertical: -0.2)
+        XCTAssertEqual(averageGazeOffset(left: nil, right: right), right)
+        XCTAssertEqual(averageGazeOffset(left: right, right: nil), right)
+        XCTAssertNil(averageGazeOffset(left: nil, right: nil))
+    }
 }
 
 final class AttentionHysteresisTests: XCTestCase {

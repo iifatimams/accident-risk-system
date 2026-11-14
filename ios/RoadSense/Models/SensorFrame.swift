@@ -62,6 +62,11 @@ public struct SensorFrame: Codable {
     // tracked pedestrians, never a claim about a specific future path.
     public var pedestrianHazardState: String = "insufficient_evidence"
     public var eyesClosedSec: Double = 0.0
+    /// How long the COMMITTED (post-hysteresis) attention state has been
+    /// continuously off-road -- excludes faceNotDetected/uncertain, which
+    /// are a confidence problem, not a confirmed-distraction severity one.
+    /// Feeds MultimodalRiskFusion's attention-dimension severity.
+    public var offRoadGazeSec: Double = 0.0
     public var cameraStatus: String = "idle"
     public var debugFaceDetected: Bool = false
     public var debugPitch: Double = 0.0
@@ -155,6 +160,7 @@ public struct SensorFrame: Codable {
         dict["pedestrian_count"] = pedestrianCount
         dict["pedestrian_hazard_state"] = pedestrianHazardState
         dict["eyes_closed_sec"] = eyesClosedSec
+        dict["off_road_gaze_sec"] = offRoadGazeSec
         dict["camera_status"] = cameraStatus
         dict["debug_face_detected"] = debugFaceDetected
         dict["debug_pitch"] = debugPitch
