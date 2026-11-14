@@ -73,5 +73,22 @@ final class CollisionIncidentStoreTests: XCTestCase {
         XCTAssertNotNil(decoded)
         XCTAssertEqual(decoded?.count, 1)
         XCTAssertNil(decoded?.first?.syncRejected)
+        XCTAssertNil(decoded?.first?.collisionEvidenceClass, "a pre-VZCrash-evidence incident has no key for this at all")
+    }
+
+    func testRecordCollisionEvidenceAttachesClassAndConfidenceWithoutChangingStatus() {
+        let store = makeStore()
+        let incident = store.record(suspicion(), streamId: "s1", accelX: 1, accelY: 2, accelZ: 3)
+        store.recordCollisionEvidence(id: incident.id, predictedClass: "crash", confidence: 0.87)
+        let reloaded = store.incident(id: incident.id)
+        XCTAssertEqual(reloaded?.collisionEvidenceClass, "crash")
+        XCTAssertEqual(reloaded?.collisionEvidenceConfidence, 0.87)
+        XCTAssertEqual(reloaded?.status, .suspected, "evidence is supporting-only and must never itself change the incident's lifecycle status")
+    }
+
+    func testRecordCollisionEvidenceOnUnknownIdDoesNothing() {
+        let store = makeStore()
+        store.recordCollisionEvidence(id: "never-recorded", predictedClass: "crash", confidence: 0.9)
+        XCTAssertNil(store.incident(id: "never-recorded"))
     }
 }

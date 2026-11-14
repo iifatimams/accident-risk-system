@@ -18,10 +18,26 @@ import Foundation
 /// environment -- CoreML models aren't loadable outside an Xcode build --
 /// which is exactly why keeping this half separately testable matters).
 public struct RiskBreakdown: Equatable {
-  /// (0.5*poliRisk + 0.5*vzRisk) * weatherMult -- the two CoreML models'
-  /// raw, weighted-combined output. The ONE component here that is not a
-  /// hand-authored heuristic.
+  /// poliRisk * weatherMult -- the POLIDriving CoreML model's raw output,
+  /// weather-adjusted. The ONE component here that is not a hand-
+  /// authored heuristic. VZCrash is intentionally NOT blended in here
+  /// (see `collisionSupportEvidence` below and
+  /// RoadSenseOnDeviceRiskEngine.breakdown's doc comment) -- the
+  /// capstone directive requires VZCrash not be a principal contributor
+  /// to the predictive score.
   public var mlFusionBase: Double = 0.0
+  /// VZCrash's raw weighted class-probability output (same formula the
+  /// old mlFusionBase used to blend in at 50% weight), reported for
+  /// observability and for collision-pathway use ONLY. Not included in
+  /// `total` -- see mlFusionBase's doc comment.
+  public var collisionSupportEvidence: Double = 0.0
+  /// The separately-trained 5-second-ahead POLIDriving model's own
+  /// hazard probability [0, 1], or nil when that model's input wasn't
+  /// available this frame. Reported as its own field, never folded into
+  /// `total` -- the directive wants both the current score AND an
+  /// experimental 5-second-ahead estimate reported separately, not
+  /// conflated into one number.
+  public var fiveSecondAheadVehicleHazardProb: Double?
   public var jerkBoost: Double = 0.0
   public var hrVelocityBoost: Double = 0.0
   public var trafficContext: Double = 0.0

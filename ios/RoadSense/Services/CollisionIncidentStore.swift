@@ -37,6 +37,17 @@ public struct StoredIncident: Codable, Identifiable, Equatable {
   /// silently drop every previously stored incident -- Codable does not
   /// apply a stored property's default value when a key is simply absent.
   public var syncRejected: Bool?
+  /// VZCrash's collision-support classification for this incident
+  /// ("crash"/"near_miss"/"normal", matching
+  /// RoadSenseOnDeviceRiskEngine.CollisionEventClass.rawValue) and its
+  /// confidence [0, 1] -- supporting discrimination evidence ONLY,
+  /// never a gate on whether this incident exists (CollisionDetector's
+  /// threshold trigger already decided that). Optional, same
+  /// backward-compatibility reasoning as `syncRejected`: a pre-existing
+  /// stored incident has no key for this at all, and Codable does not
+  /// apply a stored property's default for an absent key.
+  public var collisionEvidenceClass: String?
+  public var collisionEvidenceConfidence: Double?
 }
 
 /// The phone must never depend on the server to preserve an accident event:
@@ -66,7 +77,8 @@ public final class CollisionIncidentStore {
       onsetEstimate: suspicion.onsetEstimate, modelVersion: suspicion.modelVersion,
       status: .suspected, detectedAt: suspicion.onsetEstimate,
       confirmedAt: nil, dismissedAt: nil, serverAlertId: nil,
-      uploaded: false, syncedDecision: false, syncRejected: false
+      uploaded: false, syncedDecision: false, syncRejected: false,
+      collisionEvidenceClass: nil, collisionEvidenceConfidence: nil
     )
     queue.sync {
       var all = loadAllLocked()
@@ -128,6 +140,18 @@ public final class CollisionIncidentStore {
   /// dismissed/resolved it), not a transient failure.
   public func markDecisionRejected(id: String) {
     _ = mutate(id: id) { $0.syncRejected = true }
+  }
+
+  /// Attaches VZCrash's discrimination evidence to an already-recorded
+  /// incident. Best-effort: if `id` isn't found (e.g. called with a stale
+  /// id), this silently does nothing rather than crashing or recreating
+  /// the incident -- the incident's existence was already decided by
+  /// CollisionDetector's threshold, not by this evidence.
+  public func recordCollisionEvidence(id: String, predictedClass: String, confidence: Double) {
+    _ = mutate(id: id) {
+      $0.collisionEvidenceClass = predictedClass
+      $0.collisionEvidenceConfidence = confidence
+    }
   }
 
   /// Detections that haven't reached the server yet -- retry these.

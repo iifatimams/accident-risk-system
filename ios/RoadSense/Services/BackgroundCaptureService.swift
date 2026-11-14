@@ -869,6 +869,29 @@ public class BackgroundCaptureService:
             self.incidentStore.record(
               suspicion, streamId: self.streamId, accelX: totalX, accelY: totalY, accelZ: totalZ
             )
+            // VZCrash-model discrimination evidence (master directive
+            // section 7: "improve discrimination between suspected
+            // collisions and ordinary events"), attached AFTER the
+            // threshold-trigger incident already exists -- this never
+            // gates whether the incident is recorded, only adds
+            // supporting evidence to it. accelObd is passed as 0.0 here
+            // (not available at this 10Hz callback without duplicating
+            // sendCurrentSnapshot's own speed-delta state-tracking);
+            // effectiveAccel/gyroMag/speedKmh are the three features
+            // that actually matter for this classification, since a
+            // true collision always shows an extreme accelMag/gyroMag
+            // spike regardless of accelObd.
+            if let evidence = self.edgeML.classifyCollisionEvidence(
+              effectiveAccel: self.currentFrame.accelMag ?? 0.0,
+              gyroMag: self.currentFrame.gyroMag ?? 0.0,
+              speedKmh: self.currentFrame.vehicleSpeed ?? 0.0,
+              accelObd: 0.0
+            ) {
+              self.incidentStore.recordCollisionEvidence(
+                id: suspicion.id, predictedClass: evidence.predictedClass.rawValue,
+                confidence: evidence.confidence
+              )
+            }
             DispatchQueue.main.async {
               self.suspectedCollision = suspicion
             }
@@ -1087,6 +1110,35 @@ public class BackgroundCaptureService:
         isDriving: riskActive
       )
       let risk = breakdown.total
+      // MARK: Multimodal Risk Fusion (master directive section 6)
+      // Groups the same breakdown components already computed above
+      // into the three principal evidence dimensions, with
+      // confidence/evidence-quality derived from whether each
+      // modality's underlying data is actually fresh right now --
+      // missing OBD/GPS, an undetected face, or no rear-camera hazard
+      // evidence must lower confidence, NOT silently read as "safe."
+      // See MultimodalRiskFusion.swift.
+      let vehicleEvidence = ModalityEvidence(
+        value: breakdown.mlFusionBase + breakdown.jerkBoost + breakdown.hrVelocityBoost,
+        confidence: measuredSpeedMps != nil ? 1.0 : 0.4
+      )
+      let lowConfidenceAttentionStates: Set<String> = ["face_not_detected", "uncertain"]
+      let attentionEvidence = ModalityEvidence(
+        value: breakdown.eyesClosedPenalty + breakdown.attentionPenalty,
+        confidence: lowConfidenceAttentionStates.contains(snapshot.attentionState) ? 0.2 : 1.0
+      )
+      let noRoadEvidenceStates: Set<String> = ["no_relevant_lead_object", "insufficient_evidence"]
+      let roadEvidenceFresh = !(noRoadEvidenceStates.contains(snapshot.forwardHazardState)
+        && noRoadEvidenceStates.contains(snapshot.pedestrianHazardState))
+      let roadEvidence = ModalityEvidence(
+        value: breakdown.trafficContext + breakdown.pedestrianContext + breakdown.leadClosingHardBoost,
+        confidence: roadEvidenceFresh ? 1.0 : 0.3
+      )
+      let multimodalEstimate = fuseMultimodalRisk(
+        vehicle: vehicleEvidence, attention: attentionEvidence, road: roadEvidence,
+        fiveSecondVehicleHazardProb: breakdown.fiveSecondAheadVehicleHazardProb,
+        contextualAdjustment: 0.0  // weather is already folded into mlFusionBase via weatherMult
+      )
       // MARK: Server Payload
       var payload = snapshot.toDictionary()
       payload["risk_active"] = riskActive
@@ -1106,6 +1158,18 @@ public class BackgroundCaptureService:
           "lead_closing_hard_boost": breakdown.leadClosingHardBoost,
           "false_positive_suppression_applied": breakdown.falsePositiveSuppressionApplied,
           "hard_override_applied": breakdown.hardOverrideApplied,
+          "collision_support_evidence": breakdown.collisionSupportEvidence,
+        ]
+        payload["multimodal_risk"] = [
+          "current_risk": multimodalEstimate.currentRisk,
+          "five_second_ahead_risk": multimodalEstimate.fiveSecondAheadRisk as Any,
+          "risk_level": multimodalEstimate.riskLevel.rawValue,
+          "vehicle_contribution": multimodalEstimate.vehicleContribution,
+          "attention_contribution": multimodalEstimate.attentionContribution,
+          "road_hazard_contribution": multimodalEstimate.roadHazardContribution,
+          "contextual_adjustment": multimodalEstimate.contextualAdjustment,
+          "evidence_quality": multimodalEstimate.evidenceQuality,
+          "dominant_factor": multimodalEstimate.dominantFactor,
         ]
       }
       // Inactive driving is not a low risk score.

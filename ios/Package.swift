@@ -42,6 +42,7 @@ let package = Package(
                 "RoadSense.entitlements",
                 "Models/FusionModel.mlpackage",
                 "Models/VZCrashModel.mlpackage",
+                "Models/PolidrivingFiveSecondModel.mlpackage",
                 "Models/SensorFrame.swift",
                 "Services/BackgroundCaptureService.swift",
                 // CollisionDetector.swift and CollisionIncidentStore.swift

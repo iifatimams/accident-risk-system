@@ -137,3 +137,36 @@ final class AttentionHysteresisTests: XCTestCase {
         }
     }
 }
+
+final class CombineDMDWithVisionTests: XCTestCase {
+    func testModelUnavailableFallsBackToVisionUnchanged() {
+        XCTAssertEqual(combineDMDWithVision(visionState: .attentive, dmdNotLookingRoadProb: nil), .attentive)
+        XCTAssertEqual(combineDMDWithVision(visionState: .lookingDown, dmdNotLookingRoadProb: nil), .lookingDown)
+    }
+
+    func testHighConfidenceDMDDisagreementEscalatesAttentiveToUncertain() {
+        let result = combineDMDWithVision(visionState: .attentive, dmdNotLookingRoadProb: 0.9)
+        XCTAssertEqual(result, .uncertain)
+    }
+
+    func testLowConfidenceDMDDisagreementDoesNotChangeAttentive() {
+        let result = combineDMDWithVision(visionState: .attentive, dmdNotLookingRoadProb: 0.4)
+        XCTAssertEqual(result, .attentive)
+    }
+
+    func testDMDNeverClearsAnExistingVisionDistractionState() {
+        // Even if DMD is VERY confident the driver IS looking at the
+        // road, an already-flagged Vision distraction state must not be
+        // silently cleared by a coarser, disagreeing signal -- the
+        // direction a real miss would be dangerous.
+        for state: DriverAttentionState in [.lookingLeft, .lookingRight, .lookingDown, .lookingUp, .eyesClosed, .faceNotDetected] {
+            let result = combineDMDWithVision(visionState: state, dmdNotLookingRoadProb: 0.01)
+            XCTAssertEqual(result, state, "\(state) must not be cleared by DMD disagreement")
+        }
+    }
+
+    func testThresholdIsConfigurable() {
+        let result = combineDMDWithVision(visionState: .attentive, dmdNotLookingRoadProb: 0.7, agreementThreshold: 0.8)
+        XCTAssertEqual(result, .attentive, "0.7 is below an 0.8 threshold -- must not escalate")
+    }
+}

@@ -178,3 +178,35 @@ public struct AttentionHysteresis {
     return committed
   }
 }
+
+/// Combines the DMD-trained attention model's binary
+/// looking_road/not_looking_road prediction with Apple Vision's own
+/// (richer, directional) gaze classification, per the master directive's
+/// Phase 2 requirement that DMD's trained output and Vision work
+/// together rather than either one silently replacing the other.
+///
+/// DMD is coarser than Vision (2 classes vs Vision's 8), so it can never
+/// supply a specific direction (left/right/down/up) -- it is used ONLY
+/// as a confirming/escalating check: when DMD strongly disagrees with
+/// Vision's "attentive" by predicting not-looking-road with high
+/// confidence, this escalates to `.uncertain` (never a fabricated
+/// specific direction DMD didn't actually predict). It deliberately
+/// NEVER clears an existing distraction/eyesClosed/faceNotDetected state
+/// that Vision already flagged -- disagreement must not resolve toward
+/// the SAFER-looking label, since that is the direction a real miss
+/// would be most dangerous in. When the model is unavailable
+/// (`dmdNotLookingRoadProb == nil`), this returns `visionState`
+/// unchanged -- Vision is the fallback, exactly as the directive asks.
+public func combineDMDWithVision(
+  visionState: DriverAttentionState,
+  dmdNotLookingRoadProb: Double?,
+  agreementThreshold: Double = 0.65
+) -> DriverAttentionState {
+  guard let prob = dmdNotLookingRoadProb else {
+    return visionState
+  }
+  if visionState == .attentive && prob >= agreementThreshold {
+    return .uncertain
+  }
+  return visionState
+}
