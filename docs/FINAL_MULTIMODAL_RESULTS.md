@@ -250,10 +250,33 @@ is correct for both cameras in landscape -- was already flagged as
 unverified-on-hardware in `CAPSTONE_DELIVERY.md` and remains so; nothing
 new was found or fixed here, and no false "fix" was made.
 
-### 7.5 Not done this pass (no fabricated completion claims)
+### 7.5 Per-driver calibration (DONE)
 
-- Individual driver/phone-mount calibration (a dedicated calibration UI
-  or flow) -- not implemented.
+Added `CalibrationBaseline`/`CalibrationSession`/`applyCalibration(...)`
+(`DriverCalibration.swift`, pure, 10 new unit tests) and
+`DriverCalibrationStore` (UserDefaults-backed, keyed by driver account
+id, 5 new unit tests -- same pattern as `CollisionIncidentStore`).
+
+A short "look at the road normally" session (default 45 frames, a few
+seconds) records each RAW pitch/yaw/roll/eye-gaze-offset reading, then
+averages them into a personal baseline, which is SUBTRACTED from every
+subsequent raw reading before it's compared against the shared
+`GazeThresholds` -- i.e. this re-centers the measurement around the
+driver's own neutral, it does not change the thresholds themselves.
+Saved per-driver-id, so swapping drivers in the same car (or the same
+driver signing in on a different phone) doesn't apply someone else's
+calibration, and a returning driver's saved baseline is reloaded
+automatically at the start of their next session.
+
+Wired into the app with a real UI: a **Calibrate** button (`ContentView.swift`),
+enabled only while the capture session is running (the front camera has
+to actually see the driver), opens a short calibration screen with a
+progress bar that dismisses itself once enough samples are collected.
+Meant to be done once per driver, right after starting a session while
+still parked -- not while actually driving.
+
+### 7.6 Not done this pass (no fabricated completion claims)
+
 - Sunglasses-specific handling -- no new logic; the existing confidence
   threshold (`.uncertain` below a minimum detection confidence) is the
   only defense, not something specific to sunglasses.

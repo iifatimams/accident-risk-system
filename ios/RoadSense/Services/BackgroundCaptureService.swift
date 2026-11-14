@@ -56,6 +56,44 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   // pipeline already owns pedestrian detection) and non-road COCO
   // classes the model can also emit.
   private static let vehicleClassLabels: Set<String> = ["car", "truck", "bus", "motorcycle", "bicycle", "train"]
+  // MARK: Per-Driver Calibration (DriverCalibration.swift)
+  @Published public private(set) var isCalibrating: Bool = false
+  @Published public private(set) var calibrationProgress: Double = 0.0
+  private var calibrationSession: CalibrationSession?
+  private var calibratingDriverId: Int?
+  private var currentCalibrationBaseline: CalibrationBaseline?
+
+  /// Starts a short "just look at the road normally" calibration
+  /// session for the given signed-in driver. Safe to call mid-trip;
+  /// every subsequent `processDriverFace` frame records a sample until
+  /// `minimumSamples` is reached, at which point the resulting baseline
+  /// is saved (DriverCalibrationStore) and activated immediately.
+  public func startCalibration(driverId: Int, minimumSamples: Int = 45) {
+    calibratingDriverId = driverId
+    calibrationSession = CalibrationSession(minimumSamples: minimumSamples)
+    Task { @MainActor in
+      self.isCalibrating = true
+      self.calibrationProgress = 0.0
+    }
+  }
+
+  public func cancelCalibration() {
+    calibrationSession = nil
+    calibratingDriverId = nil
+    Task { @MainActor in
+      self.isCalibrating = false
+      self.calibrationProgress = 0.0
+    }
+  }
+
+  /// Loads a previously-saved baseline for this driver (e.g. right after
+  /// sign-in, so a returning driver benefits from calibration done on an
+  /// earlier trip without re-calibrating). Clears to nil (uncalibrated,
+  /// not a fabricated "neutral") if this driver has never calibrated.
+  public func loadCalibration(forDriverId driverId: Int) {
+    currentCalibrationBaseline = DriverCalibrationStore.shared.baseline(forDriverId: driverId)
+  }
+
   @Published public var eyesClosedSec: Double = 0.0
   /// How long the COMMITTED (post-hysteresis) attention state has been
   /// continuously off-road -- i.e. this only starts counting once a
@@ -645,14 +683,45 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     let leftGaze = Self.gazeOffsetFromLandmarks(pupil: face.landmarks?.leftPupil, eye: face.landmarks?.leftEye)
     let rightGaze = Self.gazeOffsetFromLandmarks(pupil: face.landmarks?.rightPupil, eye: face.landmarks?.rightEye)
     let combinedGaze = averageGazeOffset(left: leftGaze, right: rightGaze)
+    // If a calibration session is active, this frame's RAW (uncalibrated)
+    // reading is recorded toward the driver's personal baseline --
+    // calibration must be measured from the same raw signal it will
+    // later be subtracted from, not from an already-adjusted one.
+    if var session = calibrationSession {
+      session.record(CalibrationSample(pitch: pitch, yaw: yaw, roll: roll, gaze: combinedGaze))
+      calibrationSession = session
+      let progress = session.progress
+      if session.isComplete, let driverId = calibratingDriverId,
+        let baseline = session.finish(now: Date().timeIntervalSince1970)
+      {
+        DriverCalibrationStore.shared.save(baseline, forDriverId: driverId)
+        currentCalibrationBaseline = baseline
+        calibrationSession = nil
+        calibratingDriverId = nil
+        Task { @MainActor in
+          self.calibrationProgress = 1.0
+          self.isCalibrating = false
+        }
+      } else {
+        Task { @MainActor in
+          self.calibrationProgress = progress
+        }
+      }
+    }
+    // Re-centers this frame's reading around the driver's own personal
+    // baseline (if calibrated) BEFORE classification, so the shared,
+    // still-unvalidated-against-real-footage thresholds in
+    // GazeThresholds apply more fairly to a driver whose own "neutral"
+    // isn't exactly 0 -- see DriverCalibration.swift.
+    let calibrated = applyCalibration(pitch: pitch, yaw: yaw, roll: roll, gaze: combinedGaze, baseline: currentCalibrationBaseline)
     let visionInstantaneous = classifyGaze(
-      pitch: pitch,
-      yaw: yaw,
-      roll: roll,
+      pitch: calibrated.pitch,
+      yaw: calibrated.yaw,
+      roll: calibrated.roll,
       eyeAspectRatio: avgEAR,
       faceDetected: true,
       confidence: face.confidence,
-      gaze: combinedGaze
+      gaze: calibrated.gaze
     )
     // DMD's own training frames come from DMD's dedicated face-facing
     // "rgb_face" camera stream, not a software crop of a wider scene --

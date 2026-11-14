@@ -226,7 +226,8 @@ public struct ContentView: View {
     @ObservedObject var auth = AuthManager.shared
     @StateObject private var permissions = PermissionTriggerManager()
     @State private var showingSettings = false
-    
+    @State private var showingCalibration = false
+
     public var body: some View {
         if !auth.isAuthenticated {
             LoginView()
@@ -244,6 +245,14 @@ public struct ContentView: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
+                        // Per-driver gaze calibration (DriverCalibration.swift)
+                        // needs the front camera actually running to see the
+                        // driver's face -- the OPPOSITE of Settings below,
+                        // which needs the session stopped. Meant to be done
+                        // right after starting a session, while still
+                        // parked, not while actually driving.
+                        Button("Calibrate") { showingCalibration = true }
+                            .disabled(!captureService.isRunning || auth.isLoading)
                         Button("Settings") { showingSettings = true }
                             .disabled(captureService.isRunning || auth.isLoading)
                         Button("Sign Out") {
@@ -383,6 +392,9 @@ public struct ContentView: View {
                 }
             }
             .sheet(isPresented: $showingSettings) { ServerSettingsView() }
+            .sheet(isPresented: $showingCalibration) {
+                CalibrationView(visionManager: captureService.visionManager, driverId: auth.currentUser?.id ?? 0)
+            }
             // Offline-capable: Confirm/Dismiss write to CollisionIncidentStore
             // directly and only best-effort attempt the server afterward --
             // this overlay works with zero connectivity. Non-dismissable by
@@ -409,6 +421,12 @@ public struct ContentView: View {
             captureService.whoopClient.targetDeviceIdentifier = auth.assignedWhoopId
             captureService.serverUrl = auth.baseUrl
             captureService.start(withStreamId: streamId, userId: auth.currentUser?.id)
+            // Reapplies a baseline from an EARLIER trip, if this driver has
+            // one saved (DriverCalibrationStore) -- a returning driver
+            // benefits immediately without re-calibrating every session.
+            if let driverId = auth.currentUser?.id {
+                captureService.visionManager.loadCalibration(forDriverId: driverId)
+            }
         }
     }
 
@@ -504,6 +522,61 @@ public struct ServerSettingsView: View {
             .toolbar { Button("Done") { dismiss() }.disabled(auth.isLoading) }
             .onAppear {
                 endpoint = auth.baseUrl
+            }
+        }
+    }
+}
+
+/// Short "just look at the road normally" calibration session
+/// (DriverCalibration.swift): everyone's resting head position and
+/// natural eye-gaze center differs, and without this the system
+/// compares every driver against one shared, average set of
+/// thresholds. Needs the capture session already running (the front
+/// camera has to actually see the driver's face) -- meant to be done
+/// right after starting a drive session, while still parked.
+public struct CalibrationView: View {
+    @ObservedObject var visionManager: VisionManager
+    let driverId: Int
+    @Environment(\.dismiss) private var dismiss
+    @State private var didStart = false
+
+    public var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                Spacer()
+                Text("Look at the road normally")
+                    .font(.title2).fontWeight(.semibold)
+                Text("Hold your head and eyes the way you naturally do while driving. This takes a few seconds and only needs doing once per driver.")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                ProgressView(value: visionManager.calibrationProgress)
+                    .padding(.horizontal, 40)
+                Text(visionManager.isCalibrating ? "Calibrating..." : "Done")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .navigationTitle("Calibration")
+            .toolbar {
+                Button("Cancel") {
+                    visionManager.cancelCalibration()
+                    dismiss()
+                }
+            }
+            .onAppear {
+                guard !didStart else { return }
+                didStart = true
+                visionManager.startCalibration(driverId: driverId)
+            }
+            .onChange(of: visionManager.isCalibrating) { _, isCalibrating in
+                // Fires when calibration completes on its own (reaches
+                // minimumSamples) -- auto-dismiss rather than making the
+                // driver tap an extra button to leave this screen.
+                if didStart && !isCalibrating {
+                    dismiss()
+                }
             }
         }
     }
