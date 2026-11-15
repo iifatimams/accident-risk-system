@@ -56,8 +56,10 @@ final class ClassifyGazeTests: XCTestCase {
     }
 
     func testYawBeyondThresholdIsLeftOrRight() {
-        let right = classifyGaze(pitch: 0, yaw: 0.6, roll: 0, eyeAspectRatio: 0.3, faceDetected: true, confidence: 0.9)
-        let left = classifyGaze(pitch: 0, yaw: -0.6, roll: 0, eyeAspectRatio: 0.3, faceDetected: true, confidence: 0.9)
+        // Verified on a physical device (two real driving sessions): positive
+        // Vision yaw is the driver's left, negative is the driver's right.
+        let left = classifyGaze(pitch: 0, yaw: 0.6, roll: 0, eyeAspectRatio: 0.3, faceDetected: true, confidence: 0.9)
+        let right = classifyGaze(pitch: 0, yaw: -0.6, roll: 0, eyeAspectRatio: 0.3, faceDetected: true, confidence: 0.9)
         XCTAssertEqual(right, .lookingRight)
         XCTAssertEqual(left, .lookingLeft)
         XCTAssertNotEqual(right, left)

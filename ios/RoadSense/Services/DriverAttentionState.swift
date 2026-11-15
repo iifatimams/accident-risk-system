@@ -194,16 +194,15 @@ public func classifyGaze(
     return .lookingUp
   }
   if yaw > thresholds.yawTurn {
-    // UNVERIFIED sign convention: this labels positive yaw as a turn to the
-    // viewer's right. Not confirmed against a physical device (the front
-    // camera is not mirrored, so this may be reversed from what the driver
-    // perceives as "their" left/right). Confirm by turning the head to a
-    // known side and checking debugYaw's sign against this branch; swap
-    // the two `return` values below if backward.
-    return .lookingRight
+    // Verified on a physical device across two real driving sessions:
+    // Vision's positive yaw corresponds to the driver's LEFT, not their
+    // right (the front camera's raw buffer coordinate space is mirrored
+    // relative to how the driver perceives their own left/right). Signs
+    // below are swapped from the original unverified guess to match.
+    return .lookingLeft
   }
   if yaw < -thresholds.yawTurn {
-    return .lookingLeft
+    return .lookingRight
   }
   return .attentive
 }
