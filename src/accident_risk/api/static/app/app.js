@@ -671,6 +671,21 @@ async function sessionDetailView(id) {
         ${s.complete ? "" : " This trip is flagged incomplete and is excluded from training."}
       </p>` : ""}
     </div>
+    ${(() => {
+    const track = data.points.filter((p) => p.latitude !== null && p.longitude !== null);
+    return track.length >= 2 ? `
+    <div class="card">
+      <div class="card-head"><h2>Route</h2>
+        <span class="muted">${track.length} located points</span></div>
+      <div class="map-frame">
+        <div id="map"></div>
+        <div class="map-fallback" id="map-fallback">
+          <strong>Map unavailable</strong>
+          Street tiles need an internet connection.
+        </div>
+      </div>
+    </div>` : "";
+  })()}
     <div class="card">
       <div class="card-head"><h2>Track</h2>
         <span class="muted">${data.points.length} points</span></div>
@@ -685,6 +700,29 @@ async function sessionDetailView(id) {
          Nothing was ingested during this session.</div>`}
     </div>`;
   $("#back").addEventListener("click", () => { location.hash = "#/sessions"; });
+  renderTripRoute(data.points);
+}
+
+function renderTripRoute(points) {
+  if (!window.L || !$("#map")) return;
+  const track = points
+    .filter((p) => p.latitude !== null && p.longitude !== null)
+    .map((p) => [p.latitude, p.longitude]);
+  if (track.length < 2) return;
+
+  state.map = L.map("map", { zoomControl: true });
+  const tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+  });
+  tiles.on("load", () => { const f = $("#map-fallback"); if (f) f.remove(); });
+  tiles.addTo(state.map);
+
+  L.polyline(track, { color: "#0f766e", weight: 4, opacity: 0.85 }).addTo(state.map);
+  L.circleMarker(track[0], { radius: 7, color: "#0f766e", fillColor: "#0f766e", fillOpacity: 1 })
+    .addTo(state.map).bindPopup("Start");
+  L.circleMarker(track[track.length - 1], { radius: 7, color: "#d94f4f", fillColor: "#d94f4f", fillOpacity: 1 })
+    .addTo(state.map).bindPopup("End");
+  state.map.fitBounds(L.latLngBounds(track), { padding: [24, 24] });
 }
 
 async function alertsView() {
