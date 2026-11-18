@@ -15,11 +15,9 @@ def test_optional_and_units():
         source="synthetic",
         heart_rate=72,
         spo2=98,
-        tire_pressure_fl=235,
     )
     assert frame.accel_x is None
     assert frame.heart_rate == 72
-    assert frame.tire_pressure_fl == 235
 
 
 @pytest.mark.parametrize(
@@ -33,9 +31,6 @@ def test_optional_and_units():
         {"rpm": math.inf},
         {"gps_latitude": 95},
         {"gps_heading": 7},
-        {"steering_angle": 20},
-        {"tire_pressure_fl": 0},
-        {"tire_pressure_rr": 1200},
         {"timestamp": -1},
         {"heart_rate": 70, "sensor_timestamps": {"heart_rate": 101}},
     ],

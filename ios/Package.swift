@@ -57,7 +57,6 @@ let package = Package(
                 "Services/AmazfitClient.swift",
                 "Services/ObdBleClient.swift",
                 "Services/RoadSenseOnDeviceRiskEngine.swift",
-                "Services/Uploader.swift",
                 "Services/WhoopClient.swift",
             ]
         ),

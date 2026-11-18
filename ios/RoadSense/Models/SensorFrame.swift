@@ -34,7 +34,6 @@ public struct SensorFrame: Codable {
     
     // Physiology (WHOOP)
     public var heartRate: Double?
-    public var rrIntervalMs: Double?
     public var isWhoopConnected: Bool = false
     // Phase 15: UNVERIFIED on physical hardware -- see AmazfitClient.swift.
     public var isAmazfitConnected: Bool = false
@@ -73,20 +72,21 @@ public struct SensorFrame: Codable {
     public var debugYaw: Double = 0.0
     public var debugRoll: Double = 0.0
     public var debugEAR: Double = 0.0
-    public var phoneScreenOn: Bool = false
-    public var facialTension: Bool = false
     public var postureCollapse: Bool = false
-    public var activeCall: Bool = false
-    public var fixedGaze: Bool = false
-    public var handsOccupied: Bool = false
-    public var weavingPattern: Bool = false
-    public var sluggishGaze: Bool = false
     
     // Web UI Camera Feed (Disabled in production to prevent overheating)
     public var cameraFrame: String? = nil
     
     // Map Context
     public var isRoundabout: Bool? = false
+    // Weather Context -- see ContextManager.swift. weatherIsLive distinguishes
+    // a real fetched reading from the training-aligned "unknown" fallback
+    // (always true right now: no real OpenWeather API key is configured on
+    // either the iOS or backend side, so this is always the CLEAR/1.0
+    // default until one is added).
+    public var weatherMultiplier: Double = 1.0
+    public var weatherConditionCode: Double = 6.0
+    public var weatherIsLive: Bool = false
     
     public init(streamId: String, timestamp: Double = Date().timeIntervalSince1970) {
         self.streamId = streamId
@@ -167,15 +167,11 @@ public struct SensorFrame: Codable {
         dict["debug_yaw"] = debugYaw
         dict["debug_roll"] = debugRoll
         dict["debug_ear"] = debugEAR
-        dict["phone_screen_on"] = phoneScreenOn
-        dict["facial_tension"] = facialTension
         dict["posture_collapse"] = postureCollapse
-        dict["active_call"] = activeCall
-        dict["fixed_gaze"] = fixedGaze
-        dict["hands_occupied"] = handsOccupied
-        dict["weaving_pattern"] = weavingPattern
-        dict["sluggish_gaze"] = sluggishGaze
         dict["is_roundabout"] = isRoundabout
+        dict["weather_multiplier"] = weatherMultiplier
+        dict["weather_condition_code"] = weatherConditionCode
+        dict["weather_is_live"] = weatherIsLive
         
         if let cf = cameraFrame { dict["camera_frame"] = cf }
         

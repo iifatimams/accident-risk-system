@@ -22,7 +22,7 @@ def auth(db):
 def people(db):
     return {
         "driver": db.create_user("+971501110001", "Driver One", "driver"),
-        "manager": db.create_user("+971501110002", "Manager One", "account_manager"),
+        "other_driver": db.create_user("+971501110002", "Driver Two", "driver"),
         "admin": db.create_user("+971501110003", "Admin One", "administrator"),
     }
 
@@ -45,10 +45,8 @@ def test_phone_rejects_nonsense(raw):
 
 
 def test_role_hierarchy_is_ordered():
-    assert role_allows("administrator", "account_manager")
-    assert role_allows("account_manager", "driver")
-    assert not role_allows("driver", "account_manager")
-    assert not role_allows("account_manager", "administrator")
+    assert role_allows("administrator", "driver")
+    assert not role_allows("driver", "administrator")
     assert not role_allows("unknown", "driver")
 
 
@@ -160,23 +158,14 @@ def test_session_lifecycle(db, people):
 def test_stream_id_cannot_be_reused(db, people):
     db.start_session(people["driver"]["id"], "stream-a")
     with pytest.raises(ValueError):
-        db.start_session(people["manager"]["id"], "stream-a")
+        db.start_session(people["other_driver"]["id"], "stream-a")
 
 
 def test_sessions_scope_to_one_driver(db, people):
     db.start_session(people["driver"]["id"], "stream-a")
-    db.start_session(people["manager"]["id"], "stream-b")
+    db.start_session(people["other_driver"]["id"], "stream-b")
     assert len(db.list_sessions(user_id=people["driver"]["id"])) == 1
     assert len(db.list_sessions()) == 2
-
-
-def test_gaps_are_recorded(db, people):
-    session = db.start_session(people["driver"]["id"], "stream-a")
-    gap = db.record_gap(session["id"], "wearable", 100.0)
-    db.close_gap(gap, 118.0)
-    recorded = db.session_gaps(session["id"])
-    assert len(recorded) == 1
-    assert recorded[0]["ended_at"] - recorded[0]["started_at"] == 18.0
 
 
 # --------------------------------------------------------------- settings

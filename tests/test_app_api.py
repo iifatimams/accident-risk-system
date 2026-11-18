@@ -40,7 +40,6 @@ def sign_in(client, phone):
 def people(app):
     database = app.state.db
     database.create_user("+971501110001", "Driver One", "driver")
-    database.create_user("+971501110002", "Manager One", "account_manager")
     database.create_user("+971501110003", "Admin One", "administrator")
     return database
 
@@ -72,7 +71,7 @@ def test_wrong_code_is_refused(client, people):
     assert response.status_code == 401
 
 
-def test_driver_cannot_reach_manager_or_admin_routes(client, people):
+def test_driver_cannot_reach_administrator_routes(client, people):
     headers = sign_in(client, "+971501110001")
     assert client.get("/app/api/me", headers=headers).json()["role"] == "driver"
     assert client.get("/app/api/live", headers=headers).status_code == 403
@@ -83,17 +82,7 @@ def test_driver_cannot_reach_manager_or_admin_routes(client, people):
     ).status_code == 403
 
 
-def test_manager_cannot_reach_admin_routes(client, people):
-    headers = sign_in(client, "+971501110002")
-    assert client.get("/app/api/live", headers=headers).status_code == 200
-    assert client.get("/app/api/drivers", headers=headers).status_code == 200
-    assert client.get("/app/api/users", headers=headers).status_code == 403
-    assert client.post(
-        "/app/api/devices", headers=headers, json={"kind": "adapter", "identifier": "X"}
-    ).status_code == 403
-
-
-def test_administrator_inherits_manager_routes(client, people):
+def test_administrator_can_reach_all_staff_routes(client, people):
     headers = sign_in(client, "+971501110003")
     for path in ("/app/api/live", "/app/api/drivers", "/app/api/devices", "/app/api/users"):
         assert client.get(path, headers=headers).status_code == 200, path
@@ -157,192 +146,45 @@ def test_session_lifecycle_and_ingestion(client, people, monkeypatch):
     assert again_stop.json()["status"] == "no_active_session"
 
 
-def test_research_export_requires_consent_is_authorized_and_pseudonymous(
-    client, people, monkeypatch
-):
-    """Recording/export milestone: explicit consent gates recording AND export,
-    independent of role; CSV+JSON export is pseudonymous, precise GPS is off by
-    default and gated to account_manager+, missing sensors stay null."""
-    clock = [2_000_000.0]
-    monkeypatch.setattr("time.time", lambda: clock[0])
-    monkeypatch.setattr(
-        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
-        lambda self, latitude, longitude: False,
-    )
-    driver_headers = sign_in(client, "+971501110001")
-
-    # No consent decision yet -- reads as not granted.
-    status = client.get("/app/api/driver/research-consent", headers=driver_headers)
-    assert status.status_code == 200 and status.json()["granted"] is False
-
-    started = client.post("/app/api/driver/session/start", headers=driver_headers, json={})
-    assert started.status_code == 200
-    stream_id, session_id = started.json()["stream_id"], started.json()["id"]
-
-    def send_frames(start_step: int = 0) -> None:
-        for step in range(start_step, start_step + 6):
-            clock[0] = 2_000_000.0 + step
-            frame = {
-                "timestamp": clock[0],
-                "source": "synthetic_test",
-                "stream_id": stream_id,
-                "vehicle_speed": 15 + step,
-                "accel_x": 0.1, "accel_y": 0.2, "accel_z": 9.8,
-                "gyro_x": 0.0, "gyro_y": 0.0, "gyro_z": 0.0,
-                "heart_rate": 72,
-                "physiology_signal_quality": 1,
-                "gps_latitude": 25.3, "gps_longitude": 55.4,
-            }
-            assert client.post("/ingest", json=frame).status_code == 200
-
-    # Frames sent WITHOUT consent still drive the live dashboard, but produce
-    # no research-grade samples, and export is refused outright.
-    send_frames(start_step=0)
-    assert client.get(
-        f"/app/api/sessions/{session_id}/export.json", headers=driver_headers
-    ).status_code == 403
-
-    # Consent is self-granted -- nothing else authorizes research collection.
-    granted = client.post(
-        "/app/api/driver/research-consent", headers=driver_headers, json={"granted": True}
-    )
-    assert granted.status_code == 200 and granted.json()["granted"] is True
-
-    send_frames(start_step=10)
-
-    # Driver can export their own session; GPS is absent by default.
-    export = client.get(f"/app/api/sessions/{session_id}/export.json", headers=driver_headers)
-    assert export.status_code == 200
-    body = export.json()
-    assert body["includes_precise_location"] is False
-    rows = body["rows"]
-    assert len(rows) > 0
-    row = rows[0]
-    assert row["gps_latitude"] is None and row["gps_longitude"] is None
-    assert row["accel_x"] == 0.1 and row["heart_rate"] == 72
-    assert row["rpm"] is None  # never sent -- stays null, not coerced to 0
-    pseudonym = row["pseudonymous_participant_id"]
-    assert pseudonym.startswith("P-") and str(started.json().get("user_id", "")) not in pseudonym
-    # Only the post-consent frames produced samples -- not the pre-consent ones.
-    assert len(rows) == 6
-    # "synthetic_test" has no assigned external device -- marked explicitly,
-    # not silently null and not guessed from an unrelated assignment.
-    assert row["device_id"] == "not_applicable:source_has_no_external_device"
-
-    # A driver cannot request precise location, even on their own session.
-    gated = client.get(
-        f"/app/api/sessions/{session_id}/export.json?include_location=true", headers=driver_headers
-    )
-    assert gated.status_code == 403
-
-    # A different driver cannot export someone else's session.
-    manager_headers = sign_in(client, "+971501110002")
-    client.post(
-        "/app/api/drivers", headers=manager_headers,
-        json={"name": "Driver Two", "phone": "+971501110099"},
-    )
-    driver_two_headers = sign_in(client, "+971501110099")
-    forbidden = client.get(f"/app/api/sessions/{session_id}/export.json", headers=driver_two_headers)
-    assert forbidden.status_code == 403
-
-    # account_manager can opt into precise location.
-    unlocked = client.get(
-        f"/app/api/sessions/{session_id}/export.json?include_location=true", headers=manager_headers
-    )
-    assert unlocked.status_code == 200
-    unlocked_row = unlocked.json()["rows"][0]
-    assert unlocked_row["gps_latitude"] == 25.3 and unlocked_row["gps_longitude"] == 55.4
-    # Pseudonym is stable across exports/roles, not derived from who's asking.
-    assert unlocked_row["pseudonymous_participant_id"] == pseudonym
-
-    csv_export = client.get(f"/app/api/sessions/{session_id}/export.csv", headers=manager_headers)
-    assert csv_export.status_code == 200
-    assert csv_export.headers["content-type"].startswith("text/csv")
-    lines = csv_export.text.strip().splitlines()
-    assert len(lines) >= 2  # header + at least one data row
-    assert "pseudonymous_participant_id" in lines[0]
-
-    # Revocation stops FUTURE research recording and blocks export again --
-    # it does not retroactively delete the samples written while consent was
-    # active (preserve, don't destroy, past research data on a revoke).
-    revoked = client.post(
-        "/app/api/driver/research-consent", headers=driver_headers, json={"granted": False}
-    )
-    assert revoked.status_code == 200 and revoked.json()["granted"] is False
-    send_frames(start_step=20)
-    assert client.get(
-        f"/app/api/sessions/{session_id}/export.json", headers=driver_headers
-    ).status_code == 403
-    # `people` is the live Database instance (see its fixture) -- reading it
-    # directly, bypassing the now-blocked export route, confirms the earlier
-    # rows are still there on disk, just no longer exportable.
-    assert len(people.session_samples(session_id)) == 6
-
-
-def test_research_export_carries_camera_derived_features(client, people, monkeypatch):
-    """Export verification: camera-derived fields (eyes-on-road, traffic,
-    pedestrians) reach the export, not just the sensor/physiology columns."""
+def test_full_sample_is_recorded_unconditionally_with_weather_and_pose(client, people, monkeypatch):
+    """The full per-frame record has no consent gate -- every session gets
+    one -- and carries the raw head-pose/eye diagnostics and weather context
+    alongside the vehicle and physiology fields, not just what feeds the
+    live risk score."""
     monkeypatch.setattr(
         "accident_risk.api.main.MapContextResolver.is_in_roundabout",
         lambda self, latitude, longitude: False,
     )
     headers = sign_in(client, "+971501110001")
-    started = client.post("/app/api/driver/session/start", headers=headers, json={})
-    stream_id, session_id = started.json()["stream_id"], started.json()["id"]
-    client.post("/app/api/driver/research-consent", headers=headers, json={"granted": True})
-
-    # edge_mode (iOS + risk_active) produces a prediction on the FIRST frame,
-    # no warmup loop needed, and is where eyes_on_road/traffic_level/etc live.
-    frame = {
-        "timestamp": time.time(),
-        "source": "ios",
-        "stream_id": stream_id,
-        "risk_active": True,
-        "risk_score": 42,
-        "eyes_on_road": False,
-        "attention_state": "looking_down",
-        "traffic_level": "moderate",
-        "pedestrians_detected": True,
-        "pedestrian_count": 2,
-        "pedestrian_hazard_state": "entering_conflict_zone",
-        "lead_closing_fast": True,
-        "forward_hazard_state": "increasing_closing_hazard",
-    }
-    assert client.post("/ingest", json=frame).status_code == 200
-
-    export = client.get(f"/app/api/sessions/{session_id}/export.json", headers=headers).json()
-    assert len(export["rows"]) > 0
-    row = export["rows"][0]
-    assert row["eyes_on_road"] is False
-    assert row["attention_state"] == "looking_down"
-    assert row["traffic_level"] == "moderate"
-    assert row["pedestrians_detected"] is True
-    assert row["pedestrian_count"] == 2
-    assert row["pedestrian_hazard_state"] == "entering_conflict_zone"
-    assert row["lead_closing_fast"] is True
-    assert row["forward_hazard_state"] == "increasing_closing_hazard"
-    assert row["overall_risk_index"] == pytest.approx(0.42)
-
-    # Phase 17 (checkpoint resume #7): dataset versioning / reproducible
-    # export manifests -- a researcher comparing two exports needs to know
-    # whether a missing column means "not recorded" or "predates this
-    # export format."
-    manifest = export["manifest"]
-    assert manifest["export_schema_version"]
-    assert "attention_state" in manifest["columns"]
-    assert manifest["row_count"] == len(export["rows"])
-    assert manifest["generated_at"] > 0
-
-    csv_export = client.get(f"/app/api/sessions/{session_id}/export.csv", headers=headers)
-    assert csv_export.status_code == 200
-    assert csv_export.headers["x-export-schema-version"] == manifest["export_schema_version"]
-    assert f"_schema_v{manifest['export_schema_version']}.csv" in csv_export.headers["content-disposition"]
-    assert "attention_state" in csv_export.text.splitlines()[0]
+    me = client.get("/app/api/me", headers=headers).json()
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": started["stream_id"],
+        "risk_active": True, "risk_score": 12.5,
+        "vehicle_speed": 15.0, "heart_rate": 80,
+        "debug_pitch": -0.3, "debug_yaw": 0.1, "debug_roll": 0.05, "debug_ear": 0.22,
+        "eyes_on_road": False, "eyes_closed_sec": 1.2,
+        "weather_multiplier": 1.25, "weather_condition_code": 8.0, "weather_is_live": True,
+    })
+    session_id = people.active_session(me["id"])["id"]
+    samples = people.session_samples(session_id)
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample["debug_pitch"] == -0.3
+    assert sample["debug_yaw"] == 0.1
+    assert sample["debug_roll"] == 0.05
+    assert sample["debug_ear"] == 0.22
+    assert sample["eyes_on_road"] is False
+    assert sample["eyes_closed_sec"] == 1.2
+    assert sample["weather_multiplier"] == 1.25
+    assert sample["weather_condition_code"] == 8.0
+    assert sample["weather_is_live"] is True
+    assert sample["heart_rate"] == 80
 
 
 def test_drivers_only_see_their_own_sessions(client, people):
     driver = sign_in(client, "+971501110001")
-    manager = sign_in(client, "+971501110002")
+    admin = sign_in(client, "+971501110003")
     created = client.post("/app/api/driver/session/start", headers=driver, json={}).json()
 
     other = people.create_user("+971501110009", "Driver Two", "driver")
@@ -354,19 +196,18 @@ def test_drivers_only_see_their_own_sessions(client, people):
     assert client.get(
         f"/app/api/sessions/{hidden['id']}", headers=driver
     ).status_code == 403
-    assert client.get(f"/app/api/sessions/{hidden['id']}", headers=manager).status_code == 200
+    assert client.get(f"/app/api/sessions/{hidden['id']}", headers=admin).status_code == 200
 
 
-def test_manager_enrols_a_driver_with_a_kit(client, people):
+def test_administrator_enrols_a_driver_with_a_kit(client, people):
     admin = sign_in(client, "+971501110003")
     adapter = client.post(
         "/app/api/devices", headers=admin, json={"kind": "adapter", "identifier": "ELM-010"}
     ).json()
 
-    manager = sign_in(client, "+971501110002")
     enrolled = client.post(
         "/app/api/drivers",
-        headers=manager,
+        headers=admin,
         json={"phone": "+971501110020", "name": "New Driver", "adapter_id": adapter["id"]},
     )
     assert enrolled.status_code == 201
@@ -401,21 +242,26 @@ def test_administrator_cannot_lock_themselves_out(client, people):
     ).status_code == 409
 
 
-def test_collision_alert_can_be_cancelled_by_the_driver(client, people):
+def test_collision_alert_can_be_cancelled_by_the_driver(client, people, monkeypatch):
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
     headers = sign_in(client, "+971501110001")
     started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
-    raised = client.post(
-        "/app/api/driver/collision",
-        headers=headers,
-        json={"stream_id": started["stream_id"], "latitude": 25.3, "longitude": 55.4},
-    )
-    assert raised.status_code == 200 and raised.json()["status"] == "pending"
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+        "gps_latitude": 25.3, "gps_longitude": 55.4,
+    })
+    raised = client.get("/app/api/alerts", headers=headers).json()[0]
+    assert raised["status"] == "awaiting_confirmation"
 
     state = client.get("/app/api/driver/state", headers=headers).json()
-    assert state["pending_collision"]["id"] == raised.json()["id"]
+    assert state["pending_collision"]["id"] == raised["id"]
 
-    cancelled = client.post(f"/app/api/alerts/{raised.json()['id']}/cancel", headers=headers)
-    assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
+    cancelled = client.post(f"/app/api/alerts/{raised['id']}/dismiss", headers=headers)
+    assert cancelled.status_code == 200 and cancelled.json()["status"] == "dismissed"
 
 
 def test_automatic_collision_detection_is_independent_and_suppresses_duplicates(
@@ -748,13 +594,17 @@ def test_unconfirmed_collision_incident_times_out(client, app, people, monkeypat
     monkeypatch.setattr("time.time", lambda: clock[0])
     headers = sign_in(client, "+971501110001")
 
-    # A family contact, so the timeout notification's wording can be
+    # A linked family member, so the timeout notification's wording can be
     # checked directly -- it must never claim a verified accident.
-    contact = client.post(
-        "/app/api/driver/family-contacts", headers=headers,
-        json={"name": "Watchful Uncle", "phone": "+971500000555"},
+    people.create_user("+971500000555", "Watchful Uncle", "driver")
+    uncle_headers = sign_in(client, "+971500000555")
+    request = client.post(
+        "/app/api/driver/family-request", headers=headers, json={"phone": "+971500000555"}
     ).json()
-    client.post("/app/api/family/accept", json={"token": contact["invite_token"]})
+    client.post(
+        f"/app/api/driver/family-links/{request['id']}/respond",
+        headers=uncle_headers, json={"accept": True},
+    )
 
     started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
     client.post("/ingest", json={
@@ -783,52 +633,103 @@ def test_unconfirmed_collision_incident_times_out(client, app, people, monkeypat
     assert "confirmed they were in a collision" not in message
 
 
-def test_family_contact_invite_accept_and_revoke(client, people):
-    """Explicit consent: a contact only ever becomes notifiable by using
-    their own invite_token -- never assumed, never driver-granted on their
-    behalf."""
+def test_family_link_request_accept_and_remove(client, people):
+    """Explicit consent: a link only ever becomes accepted by the
+    RECIPIENT's own response -- never assumed, never requester-granted on
+    their behalf."""
     headers = sign_in(client, "+971501110001")
-    invited = client.post(
-        "/app/api/driver/family-contacts", headers=headers,
-        json={"name": "Aunt Mona", "phone": "+971500000111", "relationship": "aunt"},
+    people.create_user("+971500000111", "Aunt Mona", "driver")
+    aunt_headers = sign_in(client, "+971500000111")
+
+    requested = client.post(
+        "/app/api/driver/family-request", headers=headers, json={"phone": "+971500000111"}
     )
-    assert invited.status_code == 201
-    contact = invited.json()
-    assert contact["status"] == "invited"
-    token = contact["invite_token"]
+    assert requested.status_code == 201
+    link = requested.json()
+    assert link["status"] == "requested"
 
-    # Not yet notifiable: invited, not accepted.
-    assert client.get("/app/api/driver/family-contacts", headers=headers).json()[0]["status"] == "invited"
+    # Not yet accepted.
+    assert client.get("/app/api/driver/family-links", headers=headers).json()[0]["status"] == "requested"
 
-    accepted = client.post("/app/api/family/accept", json={"token": token})
+    # Only the recipient can respond -- the requester trying to "accept"
+    # their own request must not be able to.
+    forbidden = client.post(
+        f"/app/api/driver/family-links/{link['id']}/respond", headers=headers, json={"accept": True}
+    )
+    assert forbidden.status_code == 404
+
+    accepted = client.post(
+        f"/app/api/driver/family-links/{link['id']}/respond",
+        headers=aunt_headers, json={"accept": True},
+    )
     assert accepted.status_code == 200 and accepted.json()["status"] == "accepted"
 
-    listed = client.get("/app/api/driver/family-contacts", headers=headers).json()
+    listed = client.get("/app/api/driver/family-links", headers=headers).json()
     assert listed[0]["status"] == "accepted"
 
-    # The same token cannot be used again (not reusable to re-authorize).
-    reused = client.post("/app/api/family/accept", json={"token": token})
+    # Already answered -- not reusable to re-authorize or re-decide.
+    reused = client.post(
+        f"/app/api/driver/family-links/{link['id']}/respond", headers=aunt_headers, json={"accept": False}
+    )
     assert reused.status_code == 404
 
-    revoked = client.post(
-        f"/app/api/driver/family-contacts/{contact['id']}/revoke", headers=headers
-    )
-    assert revoked.status_code == 200 and revoked.json()["status"] == "revoked"
+    removed = client.post(f"/app/api/driver/family-links/{link['id']}/remove", headers=headers)
+    assert removed.status_code == 200 and removed.json()["status"] == "removed"
+    assert client.get("/app/api/driver/family-links", headers=headers).json() == []
 
 
-def test_one_driver_cannot_revoke_another_drivers_family_contact(client, people):
+def test_one_driver_cannot_remove_another_drivers_family_link(client, people):
     first = sign_in(client, "+971501110001")
-    contact = client.post(
-        "/app/api/driver/family-contacts", headers=first,
-        json={"name": "Dad", "phone": "+971500000222"},
+    people.create_user("+971500000222", "Dad", "driver")
+    link = client.post(
+        "/app/api/driver/family-request", headers=first, json={"phone": "+971500000222"}
     ).json()
 
     people.create_user("+971501110031", "Driver Four", "driver")
     second = sign_in(client, "+971501110031")
-    forbidden = client.post(
-        f"/app/api/driver/family-contacts/{contact['id']}/revoke", headers=second
-    )
+    forbidden = client.post(f"/app/api/driver/family-links/{link['id']}/remove", headers=second)
     assert forbidden.status_code == 404
+
+
+def test_unregistered_phone_creates_a_new_driver_account_with_devices(client, people):
+    """Requesting a family link with a phone number that isn't a driver yet
+    creates a real, loggable-in driver account for them, with its own
+    device assignment -- not just a lightweight, no-login contact."""
+    headers = sign_in(client, "+971501110001")
+
+    missing_name = client.post(
+        "/app/api/driver/family-request", headers=headers, json={"phone": "+971500000333"}
+    )
+    assert missing_name.status_code == 422
+
+    created = client.post(
+        "/app/api/driver/family-request", headers=headers,
+        json={
+            "phone": "+971500000333", "name": "Grandma",
+            "obd_identifier": "OBD-GMA-01", "wearable_identifier": "WHOOP-GMA-01",
+        },
+    )
+    assert created.status_code == 201
+
+    new_driver = people.get_user_by_phone("+971500000333")
+    assert new_driver is not None and new_driver["role"] == "driver"
+    kit = people.kit_for_user(new_driver["id"])
+    assert {d["identifier"] for d in kit} == {"OBD-GMA-01", "WHOOP-GMA-01"}
+
+    # The new account can sign in and see the pending request itself.
+    grandma_headers = sign_in(client, "+971500000333")
+    pending = client.get("/app/api/driver/family-links", headers=grandma_headers).json()
+    assert len(pending) == 1 and pending[0]["status"] == "requested"
+
+
+def test_family_page_serves_for_any_token(client):
+    """The static family page itself doesn't validate the token (the POST
+    to /app/api/family/accept-or-acknowledge does) -- it just needs to
+    serve so a contact's link actually opens something, closing the
+    previous gap where no frontend existed for this use case at all."""
+    response = client.get("/family/some-invite-token")
+    assert response.status_code == 200
+    assert "RoadSense" in response.text
 
 
 def test_confirmed_collision_notifies_family_respecting_location_consent(
@@ -843,16 +744,33 @@ def test_confirmed_collision_notifies_family_respecting_location_consent(
     )
     headers = sign_in(client, "+971501110001")
 
+    people.create_user("+971500000333", "Nearby Contact", "driver")
+    people.create_user("+971500000444", "Distant Contact", "driver")
+    near_headers = sign_in(client, "+971500000333")
+    far_headers = sign_in(client, "+971500000444")
+
     near = client.post(
-        "/app/api/driver/family-contacts", headers=headers,
-        json={"name": "Nearby Contact", "phone": "+971500000333", "share_location": True},
+        "/app/api/driver/family-request", headers=headers, json={"phone": "+971500000333"}
     ).json()
     far = client.post(
-        "/app/api/driver/family-contacts", headers=headers,
-        json={"name": "Distant Contact", "phone": "+971500000444", "share_location": False},
+        "/app/api/driver/family-request", headers=headers, json={"phone": "+971500000444"}
     ).json()
-    client.post("/app/api/family/accept", json={"token": near["invite_token"]})
-    client.post("/app/api/family/accept", json={"token": far["invite_token"]})
+    client.post(
+        f"/app/api/driver/family-links/{near['id']}/respond", headers=near_headers, json={"accept": True}
+    )
+    client.post(
+        f"/app/api/driver/family-links/{far['id']}/respond", headers=far_headers, json={"accept": True}
+    )
+    # The driver controls what THEY disclose to each linked family member,
+    # independently per link -- near sees location, far does not.
+    client.patch(
+        f"/app/api/driver/family-links/{near['id']}/permissions", headers=headers,
+        json={"share_location": True},
+    )
+    client.patch(
+        f"/app/api/driver/family-links/{far['id']}/permissions", headers=headers,
+        json={"share_location": False},
+    )
 
     started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
     client.post("/ingest", json={
@@ -875,39 +793,40 @@ def test_confirmed_collision_notifies_family_respecting_location_consent(
     client.post(f"/app/api/alerts/{incident['id']}/confirm", headers=headers)
     assert len(app.state.notification_sender.sent) == 2
 
-    # The driver's own view of who was told, and whether they've acknowledged.
-    notifications = client.get(
-        f"/app/api/alerts/{incident['id']}/family-notifications", headers=headers
-    ).json()
+    # Who was told, and whether they've acknowledged -- read directly off the
+    # database, since no screen in the app surfaces this list (the HTTP route
+    # that used to expose it was unused and removed).
+    notifications = people.list_family_notifications(incident["id"])
     assert len(notifications) == 2
     assert all(n["acknowledged_at"] is None for n in notifications)
     ack = client.post("/app/api/family/acknowledge", json={"token": notifications[0]["acknowledge_token"]})
     assert ack.status_code == 200 and ack.json()["status"] == "acknowledged"
-    refreshed = client.get(
-        f"/app/api/alerts/{incident['id']}/family-notifications", headers=headers
-    ).json()
+    refreshed = people.list_family_notifications(incident["id"])
     assert sum(1 for n in refreshed if n["acknowledged_at"] is not None) == 1
 
 
-def test_manager_confirmed_incident_notifies_family_with_different_wording(
+def test_administrator_confirmed_incident_notifies_family_with_different_wording(
     client, app, people, monkeypatch
 ):
-    """Checkpoint resume task #4: an account manager can confirm another
-    driver's alert (role_allows(..., "account_manager")) -- the family
-    message must say so, never attribute the manager's action to the
-    driver as if the driver confirmed it themselves."""
+    """An administrator can confirm another driver's alert
+    (role_allows(..., "administrator")) -- the family message must say so,
+    never attribute the administrator's action to the driver as if the
+    driver confirmed it themselves."""
     monkeypatch.setattr(
         "accident_risk.api.main.MapContextResolver.is_in_roundabout",
         lambda self, latitude, longitude: False,
     )
     driver_headers = sign_in(client, "+971501110001")
-    manager_headers = sign_in(client, "+971501110002")
+    admin_headers = sign_in(client, "+971501110003")
 
-    contact = client.post(
-        "/app/api/driver/family-contacts", headers=driver_headers,
-        json={"name": "Watchful Aunt", "phone": "+971500000666"},
+    people.create_user("+971500000666", "Watchful Aunt", "driver")
+    aunt_headers = sign_in(client, "+971500000666")
+    link = client.post(
+        "/app/api/driver/family-request", headers=driver_headers, json={"phone": "+971500000666"}
     ).json()
-    client.post("/app/api/family/accept", json={"token": contact["invite_token"]})
+    client.post(
+        f"/app/api/driver/family-links/{link['id']}/respond", headers=aunt_headers, json={"accept": True}
+    )
 
     started = client.post("/app/api/driver/session/start", headers=driver_headers, json={}).json()
     client.post("/ingest", json={
@@ -916,54 +835,62 @@ def test_manager_confirmed_incident_notifies_family_with_different_wording(
     })
     incident = client.get("/app/api/alerts", headers=driver_headers).json()[0]
 
-    confirmed = client.post(f"/app/api/alerts/{incident['id']}/confirm", headers=manager_headers)
+    confirmed = client.post(f"/app/api/alerts/{incident['id']}/confirm", headers=admin_headers)
     assert confirmed.status_code == 200 and confirmed.json()["status"] == "confirmed"
 
     sent = app.state.notification_sender.sent
     assert len(sent) == 1
-    assert "account manager, not the driver" in sent[0]["message"]
+    assert "administrator, not the driver" in sent[0]["message"]
     assert "Driver One confirmed they were in a collision" not in sent[0]["message"]
 
 
-def test_accepting_an_invite_does_not_itself_grant_location_access(client, people):
-    """Acceptance is the CONTACT's consent to being notified at all.
-    share_location is the DRIVER's separate, independent choice -- neither
-    side's consent implies the other."""
+def test_accepting_a_request_does_not_itself_grant_location_access(client, people):
+    """Acceptance is the RECIPIENT's consent to being notified at all.
+    share_location is each side's own separate, independent choice --
+    neither side's acceptance implies the other turning location on."""
     headers = sign_in(client, "+971501110001")
-    contact = client.post(
-        "/app/api/driver/family-contacts", headers=headers,
-        json={"name": "Grandpa", "phone": "+971500000666"},  # share_location omitted -> False
+    people.create_user("+971500000666", "Grandpa", "driver")
+    grandpa_headers = sign_in(client, "+971500000666")
+    link = client.post(
+        "/app/api/driver/family-request", headers=headers, json={"phone": "+971500000666"}
     ).json()
-    assert contact["share_location"] is False
+    assert link["requester_share_location"] is False  # off by default
 
-    accepted = client.post("/app/api/family/accept", json={"token": contact["invite_token"]})
+    accepted = client.post(
+        f"/app/api/driver/family-links/{link['id']}/respond", headers=grandpa_headers, json={"accept": True}
+    )
     assert accepted.status_code == 200
     # Acceptance alone must not have flipped it.
-    listed = client.get("/app/api/driver/family-contacts", headers=headers).json()[0]
-    assert listed["share_location"] is False
+    listed = client.get("/app/api/driver/family-links", headers=headers).json()[0]
+    assert listed["requester_share_location"] is False
 
-    # Only the driver, explicitly, can turn it on.
+    # Only the requester, explicitly, can turn on THEIR OWN half.
     updated = client.patch(
-        f"/app/api/driver/family-contacts/{contact['id']}", headers=headers,
+        f"/app/api/driver/family-links/{link['id']}/permissions", headers=headers,
         json={"share_location": True},
     )
-    assert updated.status_code == 200 and updated.json()["share_location"] is True
+    assert updated.status_code == 200 and updated.json()["requester_share_location"] is True
     # notify_accidents is configured independently and is untouched by that call.
-    assert updated.json()["notify_accidents"] is True
+    assert updated.json()["requester_notify_accidents"] is True
+    # The recipient's own half is completely untouched by the requester's change.
+    assert updated.json()["recipient_share_location"] is False
 
 
-def test_revoked_family_contact_is_not_notified(client, app, people, monkeypatch):
+def test_removed_family_link_is_not_notified(client, app, people, monkeypatch):
     monkeypatch.setattr(
         "accident_risk.api.main.MapContextResolver.is_in_roundabout",
         lambda self, latitude, longitude: False,
     )
     headers = sign_in(client, "+971501110001")
-    contact = client.post(
-        "/app/api/driver/family-contacts", headers=headers,
-        json={"name": "Ex Contact", "phone": "+971500000777"},
+    people.create_user("+971500000777", "Ex Contact", "driver")
+    ex_headers = sign_in(client, "+971500000777")
+    link = client.post(
+        "/app/api/driver/family-request", headers=headers, json={"phone": "+971500000777"}
     ).json()
-    client.post("/app/api/family/accept", json={"token": contact["invite_token"]})
-    client.post(f"/app/api/driver/family-contacts/{contact['id']}/revoke", headers=headers)
+    client.post(
+        f"/app/api/driver/family-links/{link['id']}/respond", headers=ex_headers, json={"accept": True}
+    )
+    client.post(f"/app/api/driver/family-links/{link['id']}/remove", headers=headers)
 
     started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
     client.post("/ingest", json={
@@ -975,12 +902,18 @@ def test_revoked_family_contact_is_not_notified(client, app, people, monkeypatch
     assert app.state.notification_sender.sent == []
 
 
-def test_one_driver_cannot_act_on_another_drivers_alert(client, people):
+def test_one_driver_cannot_act_on_another_drivers_alert(client, people, monkeypatch):
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
     first = sign_in(client, "+971501110001")
     started = client.post("/app/api/driver/session/start", headers=first, json={}).json()
-    alert = client.post(
-        "/app/api/driver/collision", headers=first, json={"stream_id": started["stream_id"]}
-    ).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": started["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+    })
+    alert = client.get("/app/api/alerts", headers=first).json()[0]
 
     people.create_user("+971501110030", "Driver Three", "driver")
     second = sign_in(client, "+971501110030")

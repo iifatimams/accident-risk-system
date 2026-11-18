@@ -156,7 +156,7 @@ async function signOut(silent = false) {
 $("#signout").addEventListener("click", () => signOut());
 
 const ROLE_NAMES = {
-  driver: "Driver", account_manager: "Account manager", administrator: "Administrator",
+  driver: "Driver", administrator: "Administrator",
 };
 
 function navFor(role) {
@@ -165,6 +165,7 @@ function navFor(role) {
   if (role !== "driver") items.push(["monitor", "Live drivers"]);
   items.push(["sessions", role === "driver" ? "My trips" : "Trips"]);
   items.push(["alerts", "Alerts"]);
+  if (role === "driver") items.push(["family", "Family"]);
   if (role !== "driver") items.push(["drivers", "Drivers"], ["devices", "Devices"]);
   if (role === "administrator") items.push(["users", "Users"], ["settings", "Settings"]);
   return items;
@@ -190,6 +191,7 @@ const ROUTES = {
   monitor: monitorView,
   sessions: sessionsView,
   alerts: alertsView,
+  family: familyView,
   drivers: driversView,
   devices: devicesView,
   users: usersView,
@@ -369,6 +371,8 @@ async function refreshDriver() {
   const roll = data.cv_debug_roll ?? null;
   const ear = data.cv_debug_ear ?? null;
   const riskBreakdown = data.risk_breakdown ?? null;
+  const fiveSecondRisk = data.five_second_ahead_risk ?? null;
+  const fiveSecondAdvisory = data.five_second_advisory_active ?? false;
 
   // snake_case wire values (DriverAttentionState.swift / ForwardCollisionHazard.swift /
   // PedestrianHazard.swift payloadValue) -> a short display label. Experimental
@@ -385,6 +389,7 @@ async function refreshDriver() {
       <strong>Pedestrian hazard (experimental):</strong> ${stateLabel(pedestrianHazardState)}<br>
       <strong>Lead vehicle closing:</strong> ${closingFast === null ? "Unavailable" : closingFast ? "Possible" : "Not detected"}<br>
       <strong>Forward hazard (experimental):</strong> ${stateLabel(forwardHazardState)}<br>
+      <strong>Near-term vehicle hazard (5s ahead, vehicle-only forecast)${fiveSecondAdvisory ? ' <span style="color:#e05a3a">⚠ ELEVATED</span>' : ""}:</strong> ${fiveSecondRisk === null ? "Unavailable" : `${num(fiveSecondRisk, 1)} / 99.9 (model score, not a crash probability)`}<br>
       <span style="opacity:0.7">
         -- raw diagnostics (for calibration) --<br>
         Face detected: ${faceDetected === null ? "n/a" : faceDetected ? "YES" : "NO"}<br>
@@ -458,7 +463,7 @@ async function refreshDriver() {
         <td>${esc(d.identifier)}</td>
         <td><span class="pill ${esc(d.status)}">${esc(d.status.replace(/_/g, " "))}</span></td></tr>`
       ).join("")}</tbody></table></div>`
-    : `<p class="muted">No kit assigned yet. Your account manager assigns one.</p>`;
+    : `<p class="muted">No kit assigned yet. An administrator assigns one.</p>`;
 
   if (data.pending_collision) showCollision(data.pending_collision);
   else hideCollision();
@@ -569,7 +574,7 @@ async function refreshLive() {
 
   $("#live-list").innerHTML = drivers.length ? `
     <div class="table-wrap"><table>
-      <thead><tr><th>Driver</th><th>Risk</th><th>Speed</th><th>Heart</th><th>Started</th></tr></thead>
+      <thead><tr><th>Driver</th><th>Risk</th><th>5s-ahead</th><th>Speed</th><th>Heart</th><th>Started</th></tr></thead>
       <tbody>${drivers.map((d) => `
         <tr><td>${esc(d.driver_name)}</td>
         <td>${d.risk_active === false ? '<span class="pill">Not driving</span>'
@@ -577,6 +582,9 @@ async function refreshLive() {
       : d.risk_index !== null && d.risk_index !== undefined && d.risk_level
         ? `<span class="pill ${esc(d.risk_level.toLowerCase())}">${esc(d.risk_level)}</span>`
         : '<span class="pill">Analyzing</span>'}</td>
+        <td>${d.five_second_ahead_risk === null || d.five_second_ahead_risk === undefined ? '<span class="muted">—</span>'
+      : d.five_second_advisory_active ? `<span class="pill high">⚠ ${num(d.five_second_ahead_risk, 0)}</span>`
+      : `<span class="muted">${num(d.five_second_ahead_risk, 0)}</span>`}</td>
         <td class="num">${num(d.speed_kmh, 0)}</td>
         <td class="num">${num(d.heart_rate, 0)}</td>
         <td>${esc(clock(d.started_at))}</td></tr>`).join("")}
@@ -616,17 +624,17 @@ async function refreshLive() {
 
 async function sessionsView() {
   const sessions = await api("/sessions?limit=100");
-  const manager = state.user.role !== "driver";
+  const isAdmin = state.user.role !== "driver";
   $("#main").innerHTML = `
     <div class="card">
-      <div class="card-head"><h2>${manager ? "All trips" : "Your trips"}</h2>
+      <div class="card-head"><h2>${isAdmin ? "All trips" : "Your trips"}</h2>
         <span class="muted">${sessions.length} recorded</span></div>
       ${sessions.length ? `<div class="table-wrap"><table>
-        <thead><tr>${manager ? "<th>Driver</th>" : ""}<th>Started</th><th>Duration</th>
+        <thead><tr>${isAdmin ? "<th>Driver</th>" : ""}<th>Started</th><th>Duration</th>
           <th>Distance</th><th>Peak risk</th><th>Status</th></tr></thead>
         <tbody>${sessions.map((s) => `
           <tr class="clickable" data-id="${s.id}">
-            ${manager ? `<td>${esc(s.driver_name)}</td>` : ""}
+            ${isAdmin ? `<td>${esc(s.driver_name)}</td>` : ""}
             <td>${esc(clock(s.started_at))}</td>
             <td class="num">${duration(s.summary.duration_seconds)}</td>
             <td class="num">${s.summary.distance_km ?? " "} km</td>
@@ -668,7 +676,7 @@ async function sessionDetailView(id) {
       ${data.gaps.length ? `<p class="muted" style="margin-top:16px">
         ${data.gaps.length} connection gap${data.gaps.length === 1 ? "" : "s"} recorded,
         longest ${duration(sum.longest_gap_seconds)}.
-        ${s.complete ? "" : " This trip is flagged incomplete and is excluded from training."}
+        ${s.complete ? "" : " This trip is flagged incomplete."}
       </p>` : ""}
     </div>
     ${(() => {
@@ -727,17 +735,17 @@ function renderTripRoute(points) {
 
 async function alertsView() {
   const alerts = await api("/alerts?limit=100");
-  const manager = state.user.role !== "driver";
+  const isAdmin = state.user.role !== "driver";
   $("#main").innerHTML = `
     <div class="card">
       <div class="card-head"><h2>Alerts</h2>
         <span class="muted">${alerts.length} recorded</span></div>
       ${alerts.length ? `<div class="table-wrap"><table>
-        <thead><tr><th>Raised</th>${manager ? "<th>Driver</th>" : ""}<th>Type</th>
+        <thead><tr><th>Raised</th>${isAdmin ? "<th>Driver</th>" : ""}<th>Type</th>
           <th>Risk</th><th>Status</th><th></th></tr></thead>
         <tbody>${alerts.map((a) => `
           <tr><td>${esc(clock(a.created_at))}</td>
-          ${manager ? `<td>${esc(a.driver_name)}</td>` : ""}
+          ${isAdmin ? `<td>${esc(a.driver_name)}</td>` : ""}
           <td>${a.kind === "collision" ? "Collision" : "High risk"}</td>
           <td class="num">${num(a.risk_index, 2)}</td>
           <td><span class="pill ${esc(a.status)}">${esc(a.status)}</span></td>
@@ -754,6 +762,124 @@ async function alertsView() {
         toast("Alert acknowledged");
         alertsView();
       } catch (error) { toast(error.message, true); }
+    });
+  });
+}
+
+async function familyView() {
+  const links = await api("/driver/family-links");
+  const myId = state.user.id;
+  const pending = links.filter((l) => l.status === "requested" && l.recipient_id === myId);
+  const sent = links.filter((l) => l.status === "requested" && l.requester_id === myId);
+  const accepted = links.filter((l) => l.status === "accepted");
+
+  const row = (l, extra) => {
+    const amRequester = l.requester_id === myId;
+    const notify = amRequester ? l.requester_notify_accidents : l.recipient_notify_accidents;
+    const share = amRequester ? l.requester_share_location : l.recipient_share_location;
+    return `<tr><td>${esc(l.other_name)}</td><td>${esc(l.other_phone)}</td>${extra(l, notify, share)}</tr>`;
+  };
+
+  $("#main").innerHTML = `
+    <div class="card">
+      <div class="card-head"><h2>Family</h2></div>
+      <form id="add-family" class="form-row">
+        <div class="field"><label for="f-phone">Family member's mobile number</label>
+          <input id="f-phone" type="tel" required placeholder="+971 50 123 4567"></div>
+        <div id="f-new-fields" style="display:none">
+          <div class="field"><label for="f-name">Their name</label>
+            <input id="f-name" placeholder="Full name"></div>
+          <div class="field"><label for="f-obd">Their OBD adapter identifier (if known)</label>
+            <input id="f-obd" placeholder="e.g. ELM327-A3F2"></div>
+          <div class="field"><label for="f-wearable">Their wearable identifier (if known)</label>
+            <input id="f-wearable" placeholder="e.g. WHOOP-1234"></div>
+        </div>
+        <button class="btn primary" type="submit">Send request</button>
+      </form>
+    </div>
+    ${pending.length ? `<div class="card">
+      <div class="card-head"><h2>Requests waiting on you</h2></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Phone</th><th></th></tr></thead>
+        <tbody>${pending.map((l) => row(l, () => `
+          <td><button class="btn small" data-respond="${l.id}" data-accept="true">Accept</button>
+          <button class="btn quiet small" data-respond="${l.id}" data-accept="false">Decline</button></td>`)).join("")}
+        </tbody></table></div>
+    </div>` : ""}
+    ${sent.length ? `<div class="card">
+      <div class="card-head"><h2>Sent, waiting on them</h2></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Phone</th><th></th></tr></thead>
+        <tbody>${sent.map((l) => row(l, () => `
+          <td><button class="btn quiet small" data-remove="${l.id}">Cancel</button></td>`)).join("")}
+        </tbody></table></div>
+    </div>` : ""}
+    <div class="card">
+      <div class="card-head"><h2>My family</h2></div>
+      ${accepted.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Phone</th><th>Notify me</th><th>Share my location</th><th></th></tr></thead>
+        <tbody>${accepted.map((l) => row(l, (link, notify, share) => `
+          <td><input type="checkbox" data-permission="${link.id}" data-field="notify_accidents" ${notify ? "checked" : ""}></td>
+          <td><input type="checkbox" data-permission="${link.id}" data-field="share_location" ${share ? "checked" : ""}></td>
+          <td><button class="btn quiet small" data-remove="${link.id}">Remove</button></td>`)).join("")}
+        </tbody></table></div>`
+      : `<p class="muted">No family linked yet.</p>`}
+    </div>`;
+
+  const phoneInput = $("#f-phone");
+  const newFields = $("#f-new-fields");
+  $("#add-family").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await api("/driver/family-request", {
+        method: "POST",
+        body: {
+          phone: phoneInput.value.trim(),
+          name: $("#f-name") ? $("#f-name").value.trim() || null : null,
+          obd_identifier: $("#f-obd") ? $("#f-obd").value.trim() || null : null,
+          wearable_identifier: $("#f-wearable") ? $("#f-wearable").value.trim() || null : null,
+        },
+      });
+      toast("Family request sent");
+      familyView();
+    } catch (error) {
+      if (error.message && error.message.includes("isn't registered")) {
+        newFields.style.display = "block";
+        toast("That number isn't registered yet — fill in their details below and send again");
+      } else {
+        toast(error.message, true);
+      }
+    }
+  });
+
+  $("#main").querySelectorAll("[data-respond]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await api(`/driver/family-links/${button.dataset.respond}/respond`, {
+          method: "POST", body: { accept: button.dataset.accept === "true" },
+        });
+        familyView();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+
+  $("#main").querySelectorAll("[data-remove]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await api(`/driver/family-links/${button.dataset.remove}/remove`, { method: "POST" });
+        familyView();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+
+  $("#main").querySelectorAll("[data-permission]").forEach((checkbox) => {
+    checkbox.addEventListener("change", async () => {
+      try {
+        await api(`/driver/family-links/${checkbox.dataset.permission}/permissions`, {
+          method: "PATCH", body: { [checkbox.dataset.field]: checkbox.checked },
+        });
+        toast("Updated");
+      } catch (error) { toast(error.message, true); checkbox.checked = !checkbox.checked; }
     });
   });
 }
@@ -789,7 +915,9 @@ async function driversView() {
     : '<span class="muted">none assigned</span>'}</td>
           <td><span class="pill ${d.active ? "active" : "cancelled"}">${
   d.active ? "active" : "inactive"}</span></td>
-          <td><button class="btn quiet small" data-edit-driver="${d.id}" data-name="${esc(d.name)}">Edit Name</button></td>
+          <td>
+            <button class="btn quiet small" data-edit-driver="${d.id}" data-name="${esc(d.name)}">Edit Name</button>
+          </td>
           </tr>`).join("")}
         </tbody></table></div>`
       : `<div class="empty"><strong>No drivers yet</strong>
@@ -827,6 +955,7 @@ async function driversView() {
       } catch (error) { toast(error.message, true); }
     });
   });
+
 }
 
 async function devicesView() {
@@ -920,7 +1049,6 @@ async function usersView() {
           <input id="u-phone" type="tel" required placeholder="+971 50 123 4567"></div>
         <div class="field"><label for="u-role">Role</label><select id="u-role">
           <option value="driver">Driver</option>
-          <option value="account_manager">Account manager</option>
           <option value="administrator">Administrator</option></select></div>
         <button class="btn primary" type="submit">Add user</button>
       </form>
@@ -991,7 +1119,7 @@ const SETTING_COPY = {
   risk_high_threshold: ["High risk starts at", "Crossing this alerts the driver and logs an alert."],
   risk_critical_threshold: ["Critical risk starts at", "The most severe band."],
   session_gap_tolerance_seconds: ["Gap tolerance (seconds)",
-    "A trip with a longer gap is flagged incomplete and excluded from training."],
+    "A trip with a connection gap longer than this is flagged incomplete."],
 };
 
 async function settingsView() {

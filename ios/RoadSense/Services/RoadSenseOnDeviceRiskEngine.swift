@@ -23,7 +23,6 @@ public final class RoadSenseOnDeviceRiskEngine {
     // History buffers for proactive kinematics
     private var accelHistory: [(time: Double, val: Double)] = []
     private var hrHistory: [(time: Double, val: Double)] = []
-    private var rollingRiskHistory = RollingRiskHistory()
 
     public init() {
         let config = MLModelConfiguration()
@@ -44,59 +43,19 @@ public final class RoadSenseOnDeviceRiskEngine {
         #endif
     }
 
-    public func predictRisk(
-        effectiveAccel: Double,
-        gyroMag: Double,
-        speedKmh: Double,
-        accelObd: Double,
-        rpm: Double,
-        throttle: Double,
-        load: Double,
-        hr: Double,
-        eyesOnRoad: Bool,
-        eyesClosedSec: Double,
-        trafficLevel: String,
-        pedestriansDetected: Bool,
-        leadClosingFast: Bool,
-        inRoundabout: Bool,
-        weatherMult: Double,
-        weatherCode: Double,
-        designSpeed: Double,
-        isDriving: Bool
-    ) -> Double {
-        guard isDriving else {
-            accelHistory.removeAll()
-            hrHistory.removeAll()
-            return 0.0
-        }
-        let ml = mlComponents(
-            effectiveAccel: effectiveAccel, gyroMag: gyroMag, speedKmh: speedKmh,
-            accelObd: accelObd, rpm: rpm, throttle: throttle, load: load, hr: hr,
-            weatherCode: weatherCode, designSpeed: designSpeed
-        )
-        return breakdown(for: ml, speedKmh: speedKmh, eyesOnRoad: eyesOnRoad,
-                          eyesClosedSec: eyesClosedSec, trafficLevel: trafficLevel,
-                          pedestriansDetected: pedestriansDetected, leadClosingFast: leadClosingFast,
-                          gyroMag: gyroMag, effectiveAccel: effectiveAccel,
-                          inRoundabout: inRoundabout, weatherMult: weatherMult).total
-    }
-
-    /// Same computation as predictRisk, but returns every component
+    /// Returns every component of the risk computation
     /// (Phase 9.1's "explainable risk breakdown") instead of only the
     /// final clamped number -- for a dashboard/debug view to show WHY a
-    /// score is what it is, not just the number itself. Shares the exact
-    /// same ML-inference and history-buffer code path as predictRisk (via
-    /// mlComponents/breakdown below) -- there is no second, divergeable
-    /// copy of that logic.
+    /// score is what it is, not just the number itself.
     public func predictRiskBreakdown(
         effectiveAccel: Double,
         gyroMag: Double,
         speedKmh: Double,
         accelObd: Double,
-        rpm: Double,
-        throttle: Double,
-        load: Double,
-        hr: Double,
+        rpm: Double?,
+        throttle: Double?,
+        load: Double?,
+        hr: Double?,
         eyesOnRoad: Bool,
         eyesClosedSec: Double,
         trafficLevel: String,
@@ -106,7 +65,8 @@ public final class RoadSenseOnDeviceRiskEngine {
         weatherMult: Double,
         weatherCode: Double,
         designSpeed: Double,
-        isDriving: Bool
+        isDriving: Bool,
+        postureCollapse: Bool = false
     ) -> RiskBreakdown {
         guard isDriving else {
             accelHistory.removeAll()
@@ -122,7 +82,8 @@ public final class RoadSenseOnDeviceRiskEngine {
                           eyesClosedSec: eyesClosedSec, trafficLevel: trafficLevel,
                           pedestriansDetected: pedestriansDetected, leadClosingFast: leadClosingFast,
                           gyroMag: gyroMag, effectiveAccel: effectiveAccel,
-                          inRoundabout: inRoundabout, weatherMult: weatherMult)
+                          inRoundabout: inRoundabout, weatherMult: weatherMult,
+                          postureCollapse: postureCollapse)
     }
 
     /// VZCrash's collision-support classification, independent of the
@@ -216,12 +177,21 @@ public final class RoadSenseOnDeviceRiskEngine {
     /// twice, so history/inference never double-advances for one frame.
     private func mlComponents(
         effectiveAccel: Double, gyroMag: Double, speedKmh: Double, accelObd: Double,
-        rpm: Double, throttle: Double, load: Double, hr: Double,
+        rpm: Double?, throttle: Double?, load: Double?, hr: Double?,
         weatherCode: Double, designSpeed: Double
     ) -> MLComponents {
         let now = Date().timeIntervalSince1970
         accelHistory.append((time: now, val: effectiveAccel))
-        hrHistory.append((time: now, val: hr))
+        // A disconnected wearable must not be recorded as a 0 bpm reading --
+        // that would plant a fake "heart rate just dropped to zero" sample
+        // in the history, which then reads as a huge spurious hrVelocity
+        // the moment a real reading returns and the derivative spans that
+        // fake zero. Simply not appending anything this frame means the
+        // derivative is computed across a real gap in time instead, which
+        // Self.derivative's own minimum-span guard already handles.
+        if let hr {
+            hrHistory.append((time: now, val: hr))
+        }
         accelHistory.removeAll { now - $0.time > 30.0 }
         hrHistory.removeAll { now - $0.time > 30.0 }
 
@@ -276,33 +246,54 @@ public final class RoadSenseOnDeviceRiskEngine {
         // temperature, heart rate, visibility, precipitation, and the two
         // local-accident-history counters) -- NOT arbitrary guesses, since
         // any mismatch here biases every live prediction away from what the
-        // model was actually trained to expect for "unknown".
-        let features: [Double] = [
-            hour, speedKmh, rpm, accelObd, throttle, 90.0, load,
-            hr > 0 ? hr : 75.0, weatherCode, 10.0, 0.0, 0.0, designSpeed, 0.0,
-        ]
-
+        // model was actually trained to expect for "unknown". Heart rate is
+        // the one column of that set that CAN be live (via a connected
+        // wearable); the same 75 bpm training-time default is used only
+        // when it genuinely is not, never a fabricated 0.
+        //
+        // rpm/throttle/load have no such "no live sensor source" status --
+        // they ARE live OBD-II readings whenever the adapter is connected,
+        // so unlike the six indices above, there is no defensible trained
+        // default to substitute for them: an adapter that never connects
+        // (e.g. a vehicle whose OBD-II port does not expose these
+        // parameters at all) would otherwise silently look to the model
+        // like an engine reading 0 RPM/0% throttle/0% load while the car is
+        // actually moving at highway speed, a combination the model never
+        // saw in training and that is not an honest "unknown" either. When
+        // any of the three is unavailable, both POLIDriving models are
+        // skipped entirely for this frame rather than fed a fabricated
+        // reading -- poliRisk/fiveSecondHazardProb stay at their
+        // "unavailable" values (0.0 / nil), the same convention the rest of
+        // this engine already uses for a component that cannot be scored.
         var poliRisk = 0.0
-        if let poliArray = try? MLMultiArray(shape: [14], dataType: .double) {
-            for (index, value) in features.enumerated() {
-                poliArray[index] = NSNumber(value: value)
-            }
-            if let prediction = try? fusionModel?.prediction(features: poliArray) {
-                let pMedium = prediction.classProbability[1 as Int64] ?? 0.0
-                let pHigh = prediction.classProbability[2 as Int64] ?? 0.0
-                let pVeryHigh = prediction.classProbability[3 as Int64] ?? 0.0
-                poliRisk = (0.25 * pMedium) + (0.65 * pHigh) + (1.0 * pVeryHigh)
-            }
-        }
-
         var fiveSecondHazardProb: Double?
-        if let fiveSecondArray = try? MLMultiArray(shape: [14], dataType: .double) {
-            for (index, value) in features.enumerated() {
-                fiveSecondArray[index] = NSNumber(value: value)
+        if let rpm, let throttle, let load {
+            let hrForModel = hr.map { $0 > 0 ? $0 : 75.0 } ?? 75.0
+            let features: [Double] = [
+                hour, speedKmh, rpm, accelObd, throttle, 90.0, load,
+                hrForModel, weatherCode, 10.0, 0.0, 0.0, designSpeed, 0.0,
+            ]
+
+            if let poliArray = try? MLMultiArray(shape: [14], dataType: .double) {
+                for (index, value) in features.enumerated() {
+                    poliArray[index] = NSNumber(value: value)
+                }
+                if let prediction = try? fusionModel?.prediction(features: poliArray) {
+                    let pMedium = prediction.classProbability[1 as Int64] ?? 0.0
+                    let pHigh = prediction.classProbability[2 as Int64] ?? 0.0
+                    let pVeryHigh = prediction.classProbability[3 as Int64] ?? 0.0
+                    poliRisk = (0.25 * pMedium) + (0.65 * pHigh) + (1.0 * pVeryHigh)
+                }
             }
-            if let prediction = try? fiveSecondModel?.prediction(features: fiveSecondArray) {
-                // Trained classes are [0, 1] -- 1 == "hazardous_in_5s".
-                fiveSecondHazardProb = prediction.classProbability[1 as Int64]
+
+            if let fiveSecondArray = try? MLMultiArray(shape: [14], dataType: .double) {
+                for (index, value) in features.enumerated() {
+                    fiveSecondArray[index] = NSNumber(value: value)
+                }
+                if let prediction = try? fiveSecondModel?.prediction(features: fiveSecondArray) {
+                    // Trained classes are [0, 1] -- 1 == "hazardous_in_5s".
+                    fiveSecondHazardProb = prediction.classProbability[1 as Int64]
+                }
             }
         }
 
@@ -318,7 +309,8 @@ public final class RoadSenseOnDeviceRiskEngine {
     private func breakdown(
         for ml: MLComponents, speedKmh: Double, eyesOnRoad: Bool, eyesClosedSec: Double,
         trafficLevel: String, pedestriansDetected: Bool, leadClosingFast: Bool,
-        gyroMag: Double, effectiveAccel: Double, inRoundabout: Bool, weatherMult: Double
+        gyroMag: Double, effectiveAccel: Double, inRoundabout: Bool, weatherMult: Double,
+        postureCollapse: Bool = false
     ) -> RiskBreakdown {
         // poliRisk is already a weighted sum of CoreML classProbability
         // values, which for this exported RandomForestClassifier are
@@ -349,7 +341,8 @@ public final class RoadSenseOnDeviceRiskEngine {
             trafficLevel: trafficLevel, pedestriansDetected: pedestriansDetected,
             eyesClosedSec: eyesClosedSec, eyesOnRoad: eyesOnRoad, speedKmh: speedKmh,
             leadClosingFast: leadClosingFast, gyroMag: gyroMag, effectiveAccel: effectiveAccel,
-            inRoundabout: inRoundabout, classPred: ml.classPred, weatherMult: weatherMult
+            inRoundabout: inRoundabout, classPred: ml.classPred, weatherMult: weatherMult,
+            postureCollapse: postureCollapse
         )
         result.collisionSupportEvidence = ml.vzRisk
         result.fiveSecondAheadVehicleHazardProb = ml.fiveSecondHazardProb

@@ -48,6 +48,11 @@ public struct RiskBreakdown: Equatable {
   /// since in the original code it is one conditional block, not two
   /// independently-triggerable additions.
   public var attentionPenalty: Double = 0.0
+  /// Flat penalty applied when the front camera reads the driver's head as
+  /// collapsed forward or tilted hard to one side (see `postureCollapse`
+  /// on SensorFrame/VisionManager) -- a drowsiness/slumping cue that is
+  /// independent of, and does not replace, the eyes-closed timer above.
+  public var postureCollapsePenalty: Double = 0.0
   /// Added by the lead-closing-fast + eyes-off-road + speed combination,
   /// only when the false-positive suppressor and the eyesClosedSec>=3
   /// hard override did not already apply.
@@ -74,7 +79,8 @@ public func applyRiskHeuristics(
   effectiveAccel: Double,
   inRoundabout: Bool,
   classPred: Int,
-  weatherMult: Double
+  weatherMult: Double,
+  postureCollapse: Bool = false
 ) -> RiskBreakdown {
   var breakdown = RiskBreakdown()
   breakdown.mlFusionBase = mlFusionBase
@@ -115,6 +121,11 @@ public func applyRiskHeuristics(
     )
     breakdown.eyesClosedPenalty = rampProgress * 60.0
     riskScore += breakdown.eyesClosedPenalty
+  }
+
+  if postureCollapse {
+    breakdown.postureCollapsePenalty = 15.0
+    riskScore += 15.0
   }
 
   if !eyesOnRoad && speedKmh > 10.0 {

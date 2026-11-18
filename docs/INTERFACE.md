@@ -51,11 +51,10 @@ Privilege is strictly ordered; each role inherits everything beneath it.
 | Role | Adds |
 | --- | --- |
 | `driver` | Own connection status, session start/stop, own risk, own alerts and trips |
-| `account_manager` | Live map of every driver, all alerts, all trips, driver enrolment |
-| `administrator` | User accounts, device inventory, risk thresholds, access log |
+| `administrator` | Live map of every driver, all alerts, all trips, driver enrolment, user accounts, device inventory, risk thresholds, access log |
 
-A driver's requests for manager or administrator routes return `403`, and a
-driver reading `/app/api/sessions` sees only their own rows.
+A driver's requests for administrator routes return `403`, and a driver
+reading `/app/api/sessions` sees only their own rows.
 
 ## How a session records
 

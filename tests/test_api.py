@@ -52,11 +52,6 @@ def test_api(models, tmp_path):
             "gps_longitude": 55.2671,
             "gps_speed": 12.5,
             "gps_heading": 1.2,
-            "steering_angle": 0.12,
-            "tire_pressure_fl": 235,
-            "tire_pressure_fr": 236,
-            "tire_pressure_rl": 238,
-            "tire_pressure_rr": 237,
             "heart_rate": 74,
             "spo2": 98,
         }

@@ -365,7 +365,26 @@ public struct ContentView: View {
                     .background(Color(.secondarySystemBackground))
                     .cornerRadius(12)
                     .padding(.horizontal)
-                    
+
+                    // All four sources (OBD-II, wearable, front camera, rear
+                    // camera) must be connected for risk estimation to run,
+                    // for the whole session, not only at its start -- shown
+                    // here instead of a risk score whenever one drops out.
+                    if captureService.isRunning && !captureService.waitingForSources.isEmpty {
+                        HStack(spacing: 8) {
+                            Image(systemName: "hourglass")
+                            Text("Waiting for: \(captureService.waitingForSources.joined(separator: ", "))")
+                                .fontWeight(.semibold)
+                        }
+                        .font(.callout)
+                        .foregroundColor(.orange)
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(Color.orange.opacity(0.15))
+                        .cornerRadius(12)
+                        .padding(.horizontal)
+                    }
+
                     if let error = auth.errorMessage {
                         Text(error).font(.callout).foregroundColor(.red).padding(.horizontal)
                     }

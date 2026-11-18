@@ -50,7 +50,6 @@ accident-risk-system/
 │   ├── INTERFACE.md
 │   ├── LIVE_SETUP.md
 │   ├── MODEL_LIMITATIONS.md
-│   ├── REPOSITORY_TREE.md
 │   └── VERIFICATION.md
 ├── scripts/
 │   ├── evaluate.py
@@ -155,7 +154,4 @@ Use the config files in `configs/` to define dataset mappings, logical timestamp
 - [docs/DATASETS.md](docs/DATASETS.md)
 - [docs/LIVE_SETUP.md](docs/LIVE_SETUP.md)
 - [docs/MODEL_LIMITATIONS.md](docs/MODEL_LIMITATIONS.md)
-- [docs/REPOSITORY_TREE.md](docs/REPOSITORY_TREE.md)
 - [docs/VERIFICATION.md](docs/VERIFICATION.md)
-
-The repository tree file is kept in sync with the current workspace layout and is the best source for an exact file-by-file snapshot.

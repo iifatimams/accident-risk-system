@@ -126,7 +126,7 @@ public class AuthManager: ObservableObject {
             let profile: UserProfile = try await api.request(base: baseUrl, path: "/app/api/me", token: token)
             guard attempt == generation else { return false }
             guard profile.id > 0, !profile.phone.isEmpty,
-                  ["driver", "account_manager", "administrator"].contains(profile.role) else { throw APIError.invalidResponse }
+                  ["driver", "administrator"].contains(profile.role) else { throw APIError.invalidResponse }
             currentUser = profile
             assignedObdId = profile.kit?.first { $0.kind == "adapter" }?.identifier
             assignedWhoopId = profile.kit?.first { $0.kind == "wearable" }?.identifier

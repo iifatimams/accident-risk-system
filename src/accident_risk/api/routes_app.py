@@ -1,8 +1,5 @@
 """Product API behind the operator and driver interface. Mounted at /app/api."""
 
-import csv
-import hashlib
-import io
 import json
 import time
 from typing import Annotated, Any
@@ -21,6 +18,15 @@ from accident_risk.schemas import SENSOR_FIELDS
 SESSION_TIMEOUT_SECONDS = 180.0
 EDGE_FRESHNESS_SECONDS = 10.0
 UNCONFIRMED_INCIDENT_TIMEOUT_SECONDS = 180.0
+
+# ios/RoadSense/Services/MultimodalRiskFusion.swift computes a separate
+# 5-second-ahead vehicle-hazard score (PolidrivingFiveSecondModel.mlpackage,
+# driver-held-out ROC-AUC 0.918 -- docs/FINAL_MULTIMODAL_RESULTS.md section
+# 2.1) on a 0-99.9 scale. It is an advisory signal only: it must never gate
+# collision detection or a family notification (those stay driven solely by
+# CollisionDetector's IMU threshold), and it is a model score, not a
+# calibrated "probability of an accident."
+FIVE_SECOND_ADVISORY_THRESHOLD = 60.0
 
 
 def has_sensor_values(fields: dict[str, Any]) -> bool:
@@ -59,22 +65,18 @@ class StartSessionRequest(BaseModel):
     stream_id: str | None = Field(None, min_length=1, max_length=120)
 
 
-class CollisionRequest(BaseModel):
-    stream_id: str
-    latitude: float | None = None
-    longitude: float | None = None
-
-
-class ResearchConsentRequest(BaseModel):
-    granted: bool
-
-
-class FamilyContactRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+class FamilyRequestRequest(BaseModel):
     phone: str = Field(min_length=3, max_length=30)
-    relationship: str = Field("", max_length=60)
-    notify_accidents: bool = True
-    share_location: bool = False
+    # Only needed when `phone` isn't a registered driver yet -- supplying
+    # them creates a brand-new driver account (self-service, not just
+    # admin-only) and assigns the two named devices to it in one step.
+    name: str | None = Field(None, min_length=1, max_length=120)
+    obd_identifier: str | None = Field(None, min_length=1, max_length=120)
+    wearable_identifier: str | None = Field(None, min_length=1, max_length=120)
+
+
+class FamilyRespondRequest(BaseModel):
+    accept: bool
 
 
 class FamilyTokenRequest(BaseModel):
@@ -134,60 +136,6 @@ def risk_level_for(index: float | None, thresholds: dict[str, float]) -> str | N
     return "LOW"
 
 
-# Research export (recording/export milestone). Keep in sync with the fields
-# SessionRecorder._add_research_sample actually writes.
-EXPORT_COLUMNS = (
-    "ts", "pseudonymous_participant_id", "session_id", "device_id", "source",
-    "speed_kmh", "rpm", "throttle_position", "engine_load", "steering_angle",
-    "tire_pressure_fl", "tire_pressure_fr", "tire_pressure_rl", "tire_pressure_rr",
-    "accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z",
-    "gps_latitude", "gps_longitude", "gps_heading", "is_roundabout",
-    "heart_rate", "spo2", "hrv_rmssd", "rr_interval_ms", "physiology_signal_quality",
-    "eyes_on_road", "attention_state", "eyes_closed_sec", "traffic_level",
-    "pedestrians_detected", "pedestrian_count", "pedestrian_hazard_state",
-    "lead_closing_fast", "forward_hazard_state",
-    "event_detection_score", "vehicle_risk_score", "driver_state_risk",
-    "overall_risk_index", "risk_level", "data_quality", "model_version",
-    "quality_flags", "sensor_age_seconds", "inference_latency_ms", "warning_fired",
-    "sensor_timestamps",
-)
-# Bumped whenever EXPORT_COLUMNS changes shape (a column added/removed/
-# renamed) -- Phase 17's "dataset versioning. reproducible experiment
-# manifests": a researcher comparing two exports needs to know whether a
-# missing column means "not recorded for this session" or "this export
-# format predates that column." Embedded in every export (see
-# _prepare_export/export_session_json/export_session_csv below).
-EXPORT_SCHEMA_VERSION = "2"
-
-
-def pseudonymize_participant(user_id: int) -> str:
-    """Stable, one-way per-participant id for research export -- never the raw
-    user_id, name, or phone number. A fixed per-deployment string salt, not a
-    cryptographic secret: good enough to avoid exporting a directly-identifying
-    field, not a claim of formal anonymity."""
-    digest = hashlib.sha256(f"roadsense-research-export:{user_id}".encode()).hexdigest()[:10]
-    return f"P-{digest}"
-
-
-def build_export_rows(
-    session: dict[str, Any], samples: list[dict[str, Any]], include_location: bool
-) -> list[dict[str, Any]]:
-    """Flatten research samples for export: pseudonymous id (no name/phone),
-    precise GPS blanked unless include_location, missing readings stay null
-    rather than becoming zero, original per-sensor timestamps preserved."""
-    pseudonym = pseudonymize_participant(session["user_id"])
-    rows = []
-    for sample in samples:
-        row = {column: sample.get(column) for column in EXPORT_COLUMNS}
-        row["pseudonymous_participant_id"] = pseudonym
-        row["session_id"] = session["id"]
-        if not include_location:
-            row["gps_latitude"] = None
-            row["gps_longitude"] = None
-        rows.append(row)
-    return rows
-
-
 def create_router(
     database: Database,
     auth: AuthService,
@@ -205,24 +153,24 @@ def create_router(
 
     def notify_family_of_incident(alert: dict[str, Any]) -> None:
         """Called when a collision incident reaches a status family should
-        know about. Respects each contact's own notify_accidents AND
+        know about. Respects each linked family member's own notify AND
         share_location permissions individually; duplicate-suppressed per
-        (alert, contact) by the database's own UNIQUE constraint."""
+        (alert, recipient) by the database's own UNIQUE constraint."""
         driver = database.get_user(alert["user_id"])
         if driver is None:
             return
-        for contact in database.accepted_notifiable_contacts(alert["user_id"]):
-            if database.already_notified(alert["id"], contact["id"]):
+        for member in database.accepted_family_members_to_notify(alert["user_id"]):
+            if database.already_notified(alert["id"], member["id"]):
                 continue
             message = build_message(
-                driver["name"], alert["status"], contact["share_location"],
+                driver["name"], alert["status"], member["share_location"],
                 alert.get("latitude"), alert.get("longitude"),
                 confirmed_by_driver=alert.get("acknowledged_by") == alert["user_id"],
             )
             status = notification_sender.send(
-                contact_phone=contact["phone"], contact_name=contact["name"], message=message
+                contact_phone=member["phone"], contact_name=member["name"], message=message
             )
-            database.record_family_notification(alert["id"], contact["id"], status)
+            database.record_family_notification(alert["id"], member["id"], status)
 
     def driving_state(stream_id: str, fields: dict[str, Any], now: float) -> bool | None:
         """True=driving; False=not driving; None=no recent confirmation.
@@ -256,14 +204,13 @@ def create_router(
         return dependency
 
     any_user = Depends(get_principal)
-    manager = Depends(require("account_manager"))
     admin = Depends(require("administrator"))
 
     def visible_session(session_id: int, principal: Principal) -> dict[str, Any]:
         session = database.get_session(session_id)
         if session is None:
             raise HTTPException(404, "Session not found")
-        if not role_allows(principal.role, "account_manager") and (session["user_id"] != principal.user_id):
+        if not role_allows(principal.role, "administrator") and (session["user_id"] != principal.user_id):
             raise HTTPException(403, "You can only review your own sessions")
         database.log_access(principal.user_id, principal.role, f"session:{session_id}")
         return session
@@ -385,79 +332,95 @@ def create_router(
                 (
                     a
                     for a in database.list_alerts(user_id=principal.user_id, kind="collision", limit=5)
-                    if a["status"] == "pending"
+                    if a["status"] == "awaiting_confirmation"
                 ),
                 None,
             ),
             "models_loaded": len(engine.models),
         }
 
-    @router.get("/driver/research-consent")
-    def get_research_consent(principal: Principal = any_user) -> dict[str, Any]:
-        """Always the caller's OWN consent -- never settable or readable on
-        someone else's behalf, and independent of family-monitoring consent."""
-        return database.get_research_consent(principal.user_id)
+    @router.get("/driver/family-links")
+    def list_family_links(principal: Principal = any_user) -> list[dict[str, Any]]:
+        return database.list_family_links(principal.user_id)
 
-    @router.post("/driver/research-consent")
-    def set_research_consent(
-        payload: ResearchConsentRequest, principal: Principal = any_user
+    @router.post("/driver/family-request", status_code=201)
+    def request_family_link(
+        payload: FamilyRequestRequest, principal: Principal = any_user
     ) -> dict[str, Any]:
-        database.log_access(principal.user_id, principal.role, "research-consent")
-        return database.set_research_consent(principal.user_id, payload.granted)
+        """Driver-to-driver, by phone number -- replaces the earlier admin-
+        managed family contacts entirely. If the phone number isn't a
+        registered driver yet, name (+ device identifiers, if known)
+        creates a real new driver account right here, with login access,
+        rather than requiring an administrator (FR2.1 now allows this path
+        too, not just admin-created accounts)."""
+        recipient = database.get_user_by_phone(payload.phone)
+        if recipient is None:
+            if not payload.name:
+                raise HTTPException(
+                    422,
+                    "That phone number isn't registered yet -- provide a name "
+                    "(and OBD/wearable identifiers, if known) to create their account",
+                )
+            try:
+                recipient = database.create_user(payload.phone, payload.name, "driver")
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            for kind, identifier in (
+                ("adapter", payload.obd_identifier), ("wearable", payload.wearable_identifier),
+            ):
+                if not identifier:
+                    continue
+                try:
+                    device = database.create_device(kind, identifier)
+                except ValueError:
+                    device = next(
+                        (
+                            d for d in database.list_devices()
+                            if d["kind"] == kind and d["identifier"] == identifier
+                        ),
+                        None,
+                    )
+                if device is not None:
+                    database.update_device(device["id"], assigned_to=recipient["id"])
+        database.log_access(principal.user_id, principal.role, "family-links:request")
+        try:
+            return database.request_family_link(principal.user_id, recipient["id"])
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
-    @router.get("/driver/family-contacts")
-    def list_family_contacts(principal: Principal = any_user) -> list[dict[str, Any]]:
-        return database.list_family_contacts(principal.user_id)
-
-    @router.post("/driver/family-contacts", status_code=201)
-    def invite_family_contact(
-        payload: FamilyContactRequest, principal: Principal = any_user
+    @router.post("/driver/family-links/{link_id}/respond")
+    def respond_to_family_link(
+        link_id: int, payload: FamilyRespondRequest, principal: Principal = any_user
     ) -> dict[str, Any]:
-        """invite_token is returned here because the DRIVER is its creator
-        and has no other way to relay it (no bundled SMS/email provider) --
-        this is handing someone their own new resource's token, not
-        leaking anyone else's credential (contrast with the auth code
-        leak fixed earlier: that handed back someone ELSE's login code to
-        an unauthenticated caller who merely guessed a phone number)."""
-        database.log_access(principal.user_id, principal.role, "family-contacts:invite")
-        return database.invite_family_contact(
-            principal.user_id, payload.name, payload.phone,
-            relationship=payload.relationship,
-            notify_accidents=payload.notify_accidents,
-            share_location=payload.share_location,
-        )
-
-    @router.post("/driver/family-contacts/{contact_id}/revoke")
-    def revoke_family_contact(contact_id: int, principal: Principal = any_user) -> dict[str, Any]:
-        updated = database.revoke_family_contact(contact_id, principal.user_id)
+        """Only the RECIPIENT of the request can accept or decline it -- a
+        deliberate act by them, never assumed."""
+        updated = database.respond_to_family_link(link_id, principal.user_id, payload.accept)
         if updated is None:
-            raise HTTPException(404, "Contact not found")
+            raise HTTPException(404, "Request not found, already answered, or not yours to answer")
         return updated
 
-    @router.patch("/driver/family-contacts/{contact_id}")
-    def update_family_contact_permissions(
-        contact_id: int, payload: FamilyPermissionsRequest, principal: Principal = any_user
+    @router.post("/driver/family-links/{link_id}/remove")
+    def remove_family_link(link_id: int, principal: Principal = any_user) -> dict[str, Any]:
+        """Either party can remove a link at any time -- a pending
+        request, or an already-accepted one (leaving a family group)."""
+        if not database.remove_family_link(link_id, principal.user_id):
+            raise HTTPException(404, "Link not found or not yours")
+        return {"status": "removed"}
+
+    @router.patch("/driver/family-links/{link_id}/permissions")
+    def update_family_link_permissions(
+        link_id: int, payload: FamilyPermissionsRequest, principal: Principal = any_user
     ) -> dict[str, Any]:
-        """notify_accidents and share_location are configured independently
-        here -- the driver's own choice, separate from whether the contact
-        has accepted. Accepting never grants location access by itself."""
-        updated = database.update_family_contact_permissions(
-            contact_id, principal.user_id,
+        """Each side configures only THEIR OWN half of the link -- what
+        THEY share with the other party, independent of what the other
+        party shares back."""
+        updated = database.update_family_link_permissions(
+            link_id, principal.user_id,
             notify_accidents=payload.notify_accidents, share_location=payload.share_location,
         )
         if updated is None:
-            raise HTTPException(404, "Contact not found")
+            raise HTTPException(404, "Link not found or not yours")
         return updated
-
-    @router.post("/family/accept")
-    def accept_family_invite(payload: FamilyTokenRequest) -> dict[str, Any]:
-        """Public, token-only -- the contact is not a users() row and never
-        logs in. This is the explicit consent action the roadmap asks for:
-        accepting is a deliberate act by the contact, never assumed."""
-        accepted = database.accept_family_contact(payload.token)
-        if accepted is None:
-            raise HTTPException(404, "Invalid or already-used invite token")
-        return {"status": "accepted", "driver_user_id": accepted["driver_user_id"]}
 
     @router.post("/family/acknowledge")
     def acknowledge_family_notification(payload: FamilyTokenRequest) -> dict[str, Any]:
@@ -499,16 +462,6 @@ def create_router(
             state["risk_active"] = False
         return {"session": database.get_session(session["id"]), "summary": summary}
 
-    @router.post("/driver/collision")
-    def report_collision(payload: CollisionRequest, principal: Principal = any_user) -> dict[str, Any]:
-        session = database.active_session(principal.user_id)
-        if session is None or session["stream_id"] != payload.stream_id:
-            raise HTTPException(409, "That stream has no running session")
-        alert = recorder.report_collision(payload.stream_id, payload.latitude, payload.longitude)
-        if alert is None:
-            raise HTTPException(409, "That stream is not being recorded")
-        return alert
-
     @router.get("/alerts")
     def alerts(
         principal: Principal = any_user,
@@ -516,15 +469,15 @@ def create_router(
         limit: int = Query(100, ge=1, le=500),
     ) -> list[dict[str, Any]]:
         timeout_unconfirmed_incidents()
-        scope = None if role_allows(principal.role, "account_manager") else principal.user_id
+        scope = None if role_allows(principal.role, "administrator") else principal.user_id
         database.log_access(principal.user_id, principal.role, "alerts")
         return database.list_alerts(user_id=scope, kind=kind, limit=limit)
 
     @router.post("/alerts/{alert_id}/{action}")
     def act_on_alert(alert_id: int, action: str, principal: Principal = any_user) -> dict[str, Any]:
-        # confirm/cancel: legacy vocabulary for high_risk alerts and manual
-        # collision reports (status "pending") -- never lifecycle-enforced
-        # for those, unchanged from before. dismiss/resolve are the richer,
+        # confirm/cancel: legacy vocabulary for high_risk alerts (status
+        # "pending") -- never lifecycle-enforced for those, unchanged from
+        # before. dismiss/resolve are the richer,
         # always-enforced vocabulary for an automatically DETECTED incident
         # (see recorder.check_collision / INCIDENT_LIFECYCLE).
         #
@@ -548,7 +501,7 @@ def create_router(
         existing = next((a for a in database.list_alerts(limit=500) if a["id"] == alert_id), None)
         if existing is None:
             raise HTTPException(404, "Alert not found")
-        if not role_allows(principal.role, "account_manager") and (existing["user_id"] != principal.user_id):
+        if not role_allows(principal.role, "administrator") and (existing["user_id"] != principal.user_id):
             raise HTTPException(403, "You can only act on your own alerts")
 
         is_automatic_incident = existing.get("detail", {}).get("source") == "automatic_detector"
@@ -565,25 +518,13 @@ def create_router(
             notify_family_of_incident(updated)
         return updated
 
-    @router.get("/alerts/{alert_id}/family-notifications")
-    def alert_family_notifications(alert_id: int, principal: Principal = any_user) -> list[dict[str, Any]]:
-        """Which permitted (accepted + notify_accidents) family contacts
-        were actually notified about this incident, and whether each has
-        acknowledged -- the driver's own view of who was told."""
-        existing = next((a for a in database.list_alerts(limit=500) if a["id"] == alert_id), None)
-        if existing is None:
-            raise HTTPException(404, "Alert not found")
-        if not role_allows(principal.role, "account_manager") and (existing["user_id"] != principal.user_id):
-            raise HTTPException(403, "You can only view your own alerts")
-        return database.list_family_notifications(alert_id)
-
     @router.get("/sessions")
     def sessions(
         principal: Principal = any_user,
         driver_id: int | None = Query(None),
         limit: int = Query(50, ge=1, le=500),
     ) -> list[dict[str, Any]]:
-        scope = driver_id if role_allows(principal.role, "account_manager") else principal.user_id
+        scope = driver_id if role_allows(principal.role, "administrator") else principal.user_id
         database.log_access(principal.user_id, principal.role, "sessions")
         return database.list_sessions(user_id=scope, limit=limit)
 
@@ -596,71 +537,8 @@ def create_router(
             "gaps": database.session_gaps(session_id),
         }
 
-    def _prepare_export(
-        session_id: int, principal: Principal, include_location: bool
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        session = visible_session(session_id, principal)
-        if include_location and not role_allows(principal.role, "account_manager"):
-            raise HTTPException(403, "Precise location requires account_manager role or higher")
-        # Consent gates export regardless of who is asking or what role they
-        # hold -- a manager cannot export a participant's research data just
-        # because they're allowed to SEE the session.
-        if not database.get_research_consent(session["user_id"])["granted"]:
-            raise HTTPException(403, "This participant has not granted research consent")
-        rows = build_export_rows(session, database.session_samples(session_id), include_location)
-        database.log_access(principal.user_id, principal.role, f"session:{session_id}:export")
-        return session, rows
-
-    @router.get("/sessions/{session_id}/export.json")
-    def export_session_json(
-        session_id: int,
-        principal: Principal = any_user,
-        include_location: bool = Query(False, description="Include precise GPS; requires account_manager+"),
-    ) -> dict[str, Any]:
-        session, rows = _prepare_export(session_id, principal, include_location)
-        return {
-            "pseudonymous_participant_id": pseudonymize_participant(session["user_id"]),
-            "session_id": session_id,
-            "includes_precise_location": include_location,
-            "manifest": {
-                "export_schema_version": EXPORT_SCHEMA_VERSION,
-                "columns": list(EXPORT_COLUMNS),
-                "row_count": len(rows),
-                "generated_at": time.time(),
-            },
-            "rows": rows,
-        }
-
-    @router.get("/sessions/{session_id}/export.csv")
-    def export_session_csv(
-        session_id: int,
-        principal: Principal = any_user,
-        include_location: bool = Query(False, description="Include precise GPS; requires account_manager+"),
-    ) -> Response:
-        _, rows = _prepare_export(session_id, principal, include_location)
-        buffer = io.StringIO()
-        writer = csv.DictWriter(buffer, fieldnames=EXPORT_COLUMNS, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            flat = dict(row)
-            for key in ("quality_flags", "sensor_age_seconds", "sensor_timestamps"):
-                if flat.get(key) is not None:
-                    flat[key] = json.dumps(flat[key])
-            writer.writerow(flat)
-        return Response(
-            content=buffer.getvalue(),
-            media_type="text/csv",
-            headers={
-                "Content-Disposition": (
-                    f'attachment; filename="session_{session_id}_research_export'
-                    f'_schema_v{EXPORT_SCHEMA_VERSION}.csv"'
-                ),
-                "X-Export-Schema-Version": EXPORT_SCHEMA_VERSION,
-            },
-        )
-
     @router.get("/live")
-    def live(principal: Principal = manager) -> dict[str, Any]:
+    def live(principal: Principal = admin) -> dict[str, Any]:
         close_stale_sessions()
         timeout_unconfirmed_incidents()
         thresholds = database.get_settings()
@@ -681,6 +559,12 @@ def create_router(
                 fields = {}
 
             index, active = current_risk(stream_id, fields, now)
+            # Advisory-only vehicle-hazard forecast (see main.py's
+            # FIVE_SECOND_ADVISORY_THRESHOLD) -- never gates risk_active,
+            # risk_level, or any alert; purely a dashboard signal for the
+            # administrator live view.
+            edge_entry = edge_state.get(stream_id, {})
+            five_second_ahead_risk = edge_entry.get("five_second_ahead_risk")
             drivers.append(
                 {
                     "session_id": session["id"],
@@ -697,20 +581,25 @@ def create_router(
                     "longitude": fields.get("gps_longitude"),
                     "last_seen": last_seen,
                     "receiving": fresh and has_sensor_values(fields),
+                    "five_second_ahead_risk": five_second_ahead_risk,
+                    "five_second_advisory_active": (
+                        five_second_ahead_risk is not None
+                        and five_second_ahead_risk >= FIVE_SECOND_ADVISORY_THRESHOLD
+                    ),
                 }
             )
         database.log_access(principal.user_id, principal.role, "live")
         return {"drivers": drivers, "thresholds": thresholds, "server_time": now}
 
     @router.get("/drivers")
-    def list_drivers(principal: Principal = manager) -> list[dict[str, Any]]:
+    def list_drivers(principal: Principal = admin) -> list[dict[str, Any]]:
         drivers = database.list_users(role="driver")
         for driver in drivers:
             driver["kit"] = database.kit_for_user(driver["id"])
         return drivers
 
     @router.post("/drivers", status_code=201)
-    def enrol_driver(payload: DriverRequest, principal: Principal = manager) -> dict[str, Any]:
+    def enrol_driver(payload: DriverRequest, principal: Principal = admin) -> dict[str, Any]:
         try:
             driver = database.create_user(payload.phone, payload.name, "driver")
             for device_id in (payload.adapter_id, payload.wearable_id):
@@ -747,7 +636,7 @@ def create_router(
         return user
 
     @router.get("/devices")
-    def list_devices(principal: Principal = manager) -> list[dict[str, Any]]:
+    def list_devices(principal: Principal = admin) -> list[dict[str, Any]]:
         return database.list_devices()
 
     @router.post("/devices", status_code=201)
@@ -774,7 +663,7 @@ def create_router(
         return device
 
     @router.get("/settings")
-    def get_settings(principal: Principal = manager) -> dict[str, float]:
+    def get_settings(principal: Principal = admin) -> dict[str, float]:
         return database.get_settings()
 
     @router.put("/settings")

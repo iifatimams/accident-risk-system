@@ -14,7 +14,7 @@ from accident_risk.api.auth import AuthService
 from accident_risk.api.db import Database
 from accident_risk.api.notifications import MockNotificationSender
 from accident_risk.api.recorder import SessionRecorder
-from accident_risk.api.routes_app import create_router, risk_level_for
+from accident_risk.api.routes_app import FIVE_SECOND_ADVISORY_THRESHOLD, create_router, risk_level_for
 from accident_risk.inference.engine import InferenceEngine
 from accident_risk.logging_utils import configure_logging
 from accident_risk.models.fusion import RiskFusion
@@ -46,6 +46,23 @@ def optional_value(body: dict, *keys: str):
         if body.get(key) is not None:
             return body[key]
     return None
+
+
+def parse_five_second_ahead_risk(body: dict) -> float | None:
+    """Extract multimodal_risk.five_second_ahead_risk; never crash on a
+    missing/malformed field -- this key is a dashboard-only advisory,
+    not something inference correctness depends on."""
+    multimodal_risk = body.get("multimodal_risk")
+    if not isinstance(multimodal_risk, dict):
+        return None
+    value = multimodal_risk.get("five_second_ahead_risk")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return min(99.9, max(0.0, number))
 
 
 def parse_risk(body: dict) -> float | None:
@@ -151,6 +168,17 @@ def create_app(
             raise HTTPException(404, "Unknown RoadSense API route")
         return FileResponse(
             static_dir / "app" / "index.html", headers={"Cache-Control": "no-store"}
+        )
+
+    @application.get("/family/{token}", include_in_schema=False)
+    def family_shell(token: str) -> FileResponse:
+        # No login for a family contact (db.py: "never log in") -- the
+        # token in the URL is read client-side and POSTed to the existing
+        # public /app/api/family/accept and /app/api/family/acknowledge
+        # endpoints. This route only serves the static page; it does not
+        # validate the token itself (that happens on the POST).
+        return FileResponse(
+            static_dir / "family" / "index.html", headers={"Cache-Control": "no-store"}
         )
 
     def ingest_frame(
@@ -290,12 +318,23 @@ def create_app(
                     "debug_yaw": body.get("debug_yaw", 0.0),
                     "debug_roll": body.get("debug_roll", 0.0),
                     "debug_ear": body.get("debug_ear", 0.0),
+                    # See ios/RoadSense/Services/ContextManager.swift. Always
+                    # the CLEAR/1.0 "unknown" default until a real OpenWeather
+                    # API key is configured on the device -- weather_is_live
+                    # says which, so a stored row never silently passes off
+                    # that default as an observed reading.
+                    "weather_multiplier": body.get("weather_multiplier", 1.0),
+                    "weather_condition_code": body.get("weather_condition_code", 6.0),
+                    "weather_is_live": body.get("weather_is_live", False),
                     # Phase 9.1 explainable breakdown (ml_fusion_base, each
                     # named heuristic adjustment) -- see
                     # ios/RoadSense/Services/RiskFusionHeuristics.swift.
                     # Dashboard-only, like everything else in this block;
                     # absent entirely when risk is inactive.
                     "risk_breakdown": body.get("risk_breakdown"),
+                    # Advisory-only; never gates collision detection or
+                    # family notification (see FIVE_SECOND_ADVISORY_THRESHOLD).
+                    "five_second_ahead_risk": parse_five_second_ahead_risk(body),
                 })
             elif source_tag in LEGACY_RUNNER_SOURCES:
                 state.update({
@@ -345,11 +384,6 @@ def create_app(
                     spo2=body.get("spo2"),
                     hrv_rmssd=body.get("hrv_rmssd"),
                     physiology_signal_quality=body.get("physiology_signal_quality"),
-                    steering_angle=body.get("steering_angle"),
-                    tire_pressure_fl=body.get("tire_pressure_fl"),
-                    tire_pressure_fr=body.get("tire_pressure_fr"),
-                    tire_pressure_rl=body.get("tire_pressure_rl"),
-                    tire_pressure_rr=body.get("tire_pressure_rr"),
                     sensor_timestamps=body.get("sensor_timestamps") or {},
                     accel_x=body.get("accel_x"),
                     accel_y=body.get("accel_y"),
@@ -487,6 +521,13 @@ def create_app(
             result["cv_debug_roll"] = ui_data.get("debug_roll", 0.0)
             result["cv_debug_ear"] = ui_data.get("debug_ear", 0.0)
             result["risk_breakdown"] = ui_data.get("risk_breakdown")
+
+            five_second_ahead_risk = ui_data.get("five_second_ahead_risk")
+            result["five_second_ahead_risk"] = five_second_ahead_risk
+            result["five_second_advisory_active"] = (
+                five_second_ahead_risk is not None
+                and five_second_ahead_risk >= FIVE_SECOND_ADVISORY_THRESHOLD
+            )
 
             return result
 

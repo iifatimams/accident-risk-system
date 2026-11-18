@@ -38,21 +38,6 @@ class SensorFrame(BaseModel):
     rpm: Annotated[Finite, Field(ge=0)] | None = Field(None, description="rev/min")
     throttle_position: Percent | None = None
     engine_load: Percent | None = None
-    steering_angle: Annotated[
-        Finite, Field(ge=-12.566370614359172, le=12.566370614359172)
-    ] | None = Field(None, description="radians; positive direction must be documented")
-    tire_pressure_fl: Annotated[Finite, Field(gt=0, le=1000)] | None = Field(
-        None, description="kPa, front-left"
-    )
-    tire_pressure_fr: Annotated[Finite, Field(gt=0, le=1000)] | None = Field(
-        None, description="kPa, front-right"
-    )
-    tire_pressure_rl: Annotated[Finite, Field(gt=0, le=1000)] | None = Field(
-        None, description="kPa, rear-left"
-    )
-    tire_pressure_rr: Annotated[Finite, Field(gt=0, le=1000)] | None = Field(
-        None, description="kPa, rear-right"
-    )
     heart_rate: Annotated[Finite, Field(gt=0, le=300)] | None = Field(None, description="bpm")
     spo2: Percent | None = Field(None, description="percent")
     hrv_rmssd: Annotated[Finite, Field(ge=0)] | None = Field(

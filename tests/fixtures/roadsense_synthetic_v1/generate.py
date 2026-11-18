@@ -27,7 +27,7 @@ SCENARIOS = [
  ('gps_obd_dropout','normal','sensor interruptions and reacquisition',0),
 ]
 
-FRAME_FIELDS=['timestamp','stream_id','source','accel_x','accel_y','accel_z','gyro_x','gyro_y','gyro_z','gps_latitude','gps_longitude','gps_speed','gps_heading','vehicle_speed','rpm','throttle_position','engine_load','steering_angle','heart_rate','spo2','hrv_rmssd','rr_interval_ms','physiology_signal_quality','is_roundabout','sensor_timestamps']
+FRAME_FIELDS=['timestamp','stream_id','source','accel_x','accel_y','accel_z','gyro_x','gyro_y','gyro_z','gps_latitude','gps_longitude','gps_speed','gps_heading','vehicle_speed','rpm','throttle_position','engine_load','heart_rate','spo2','hrv_rmssd','rr_interval_ms','physiology_signal_quality','is_roundabout','sensor_timestamps']
 LABEL_FIELDS=['timestamp','stream_id','elapsed_s','scenario','outcome','collision_onset_s','event_in_next_5s','contact_now','lead_distance_m_truth','pedestrian_distance_m_truth','pedestrian_in_path_truth','hazard_present_truth','road_anchor_is_approximate','notes']
 
 

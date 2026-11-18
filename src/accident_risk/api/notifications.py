@@ -44,11 +44,10 @@ def build_message(
 ) -> str:
     """One line, human-readable, consent-respecting, and status-honest:
     - "confirmed" means SOMEONE confirmed it -- but not necessarily the
-      driver. An account manager can act on another user's alert
-      (role_allows(..., "account_manager") in routes_app.py), and wording
-      this as "{driver} confirmed" when a manager did it instead would
-      misrepresent who actually attested to the collision. Checkpoint
-      resume task #4 asks for exactly this distinction.
+      driver. An administrator can act on another user's alert
+      (role_allows(..., "administrator") in routes_app.py), and wording
+      this as "{driver} confirmed" when an administrator did it instead
+      would misrepresent who actually attested to the collision.
     - "unconfirmed_timeout" means ONLY a sensor trigger -- the driver never
       responded -- and must never be worded as a verified accident.
     Coordinates are included ONLY when share_location is True for THIS
@@ -56,7 +55,7 @@ def build_message(
     if incident_status == "confirmed" and confirmed_by_driver:
         base = f"RoadSense: {driver_name} confirmed they were in a collision."
     elif incident_status == "confirmed":
-        base = f"RoadSense: a collision for {driver_name} was confirmed by an account manager, not the driver."
+        base = f"RoadSense: a collision for {driver_name} was confirmed by an administrator, not the driver."
     elif incident_status == "unconfirmed_timeout":
         base = (
             f"RoadSense: a possible collision was detected for {driver_name}, "

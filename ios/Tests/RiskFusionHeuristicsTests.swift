@@ -14,14 +14,16 @@ final class RiskFusionHeuristicsTests: XCTestCase {
         trafficLevel: String = "empty", pedestriansDetected: Bool = false,
         eyesClosedSec: Double = 0.0, eyesOnRoad: Bool = true, speedKmh: Double = 50.0,
         leadClosingFast: Bool = false, gyroMag: Double = 0.0, effectiveAccel: Double = 9.8,
-        inRoundabout: Bool = false, classPred: Int = 2, weatherMult: Double = 1.0
+        inRoundabout: Bool = false, classPred: Int = 2, weatherMult: Double = 1.0,
+        postureCollapse: Bool = false
     ) -> RiskBreakdown {
         applyRiskHeuristics(
             mlFusionBase: mlFusionBase, jerk: jerk, hrVelocity: hrVelocity,
             trafficLevel: trafficLevel, pedestriansDetected: pedestriansDetected,
             eyesClosedSec: eyesClosedSec, eyesOnRoad: eyesOnRoad, speedKmh: speedKmh,
             leadClosingFast: leadClosingFast, gyroMag: gyroMag, effectiveAccel: effectiveAccel,
-            inRoundabout: inRoundabout, classPred: classPred, weatherMult: weatherMult
+            inRoundabout: inRoundabout, classPred: classPred, weatherMult: weatherMult,
+            postureCollapse: postureCollapse
         )
     }
 
@@ -30,6 +32,18 @@ final class RiskFusionHeuristicsTests: XCTestCase {
         XCTAssertEqual(b.total, 15.0, accuracy: 1e-9)
         XCTAssertEqual(b.jerkBoost, 0.0)
         XCTAssertEqual(b.hrVelocityBoost, 0.0)
+    }
+
+    func testPostureCollapseAddsAFlatFifteenPointPenalty() {
+        let b = baseline(mlFusionBase: 10.0, postureCollapse: true)
+        XCTAssertEqual(b.postureCollapsePenalty, 15.0, accuracy: 1e-9)
+        XCTAssertEqual(b.total, 25.0, accuracy: 1e-9)
+    }
+
+    func testPostureCollapsePenaltyIsZeroWhenNotCollapsed() {
+        let b = baseline(mlFusionBase: 10.0, postureCollapse: false)
+        XCTAssertEqual(b.postureCollapsePenalty, 0.0)
+        XCTAssertEqual(b.total, 10.0, accuracy: 1e-9)
     }
 
     func testJerkBoostOnlyAppliesAboveThresholdAndIsCapped() {

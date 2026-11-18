@@ -105,8 +105,6 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   @Published public var offRoadGazeSec: Double = 0.0
   @Published public var eyesOnRoad: Bool = true
   @Published public var postureCollapse: Bool = false
-  @Published public var fixedGaze: Bool = false
-  @Published public var sluggishGaze: Bool = false
   @Published public var leadClosingFast: Bool = false
   @Published public var trafficLevel: String = "empty"
   @Published public var pedestriansDetected: Bool = false
@@ -173,7 +171,6 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   private var backConnection: AVCaptureConnection?
   private var eyesClosedStart: Date?
   private var offRoadGazeStart: Date?
-  private var fixedGazeStart: Date?
   private var lastPitch: Double = 0.0
   private var lastYaw: Double = 0.0
   public override init() {
@@ -306,7 +303,6 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     Task { @MainActor in
       self.eyesClosedStart = nil
       self.offRoadGazeStart = nil
-      self.fixedGazeStart = nil
       self.eyesClosedSec = 0.0
       self.offRoadGazeSec = 0.0
       self.eyesOnRoad = true
@@ -321,7 +317,6 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     attentionHysteresis = AttentionHysteresis(enterDwell: attentionHysteresis.enterDwell, exitDwell: attentionHysteresis.exitDwell)
     eyesClosedStart = nil
     offRoadGazeStart = nil
-    fixedGazeStart = nil
     frontFrameTimestamps.removeAll()
     backFrameTimestamps.removeAll()
     vehicleTracker = ObjectTracker()
@@ -332,11 +327,9 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       self.eyesClosedSec = 0.0
       self.offRoadGazeSec = 0.0
       self.postureCollapse = false
-      self.fixedGaze = false
       self.trafficLevel = "empty"
       self.leadClosingFast = false
       self.leadTrack = nil
-      self.sluggishGaze = false
       self.pedestriansDetected = false
       self.pedestrianCount = 0
       self.pedestrianHazardState = .insufficientEvidence
@@ -942,6 +935,13 @@ public class BackgroundCaptureService:
   @Published public private(set) var isObdConnected: Bool = false
   @Published public private(set) var isWhoopConnected: Bool = false
   @Published public private(set) var isAmazfitConnected: Bool = false
+  // All four required sources (OBD-II, a wearable, the front camera, and
+  // the rear camera) must be connected for risk estimation to run, for
+  // the whole session, not only at the start. Empty once every source
+  // is present; otherwise lists exactly which ones are still missing, so
+  // the UI can show "Waiting for: X" instead of a risk score computed
+  // from partial evidence.
+  @Published public private(set) var waitingForSources: [String] = []
   // A UI can observe this to present an immediate "did you crash?"
   // confirm/dismiss prompt, independent of polling the server's
   // pending_collision status.
@@ -1155,8 +1155,6 @@ public class BackgroundCaptureService:
           self.visionManager.offRoadGazeSec
         snapshot.postureCollapse =
           self.visionManager.postureCollapse
-        snapshot.fixedGaze =
-          self.visionManager.fixedGaze
         snapshot.leadClosingFast =
           self.visionManager.leadClosingFast
         snapshot.trafficLevel =
@@ -1180,6 +1178,9 @@ public class BackgroundCaptureService:
         snapshot.debugEAR =
           self.visionManager.debugEAR
       }
+      snapshot.weatherMultiplier = ContextManager.shared.weatherMultiplier
+      snapshot.weatherConditionCode = ContextManager.shared.weatherConditionCode
+      snapshot.weatherIsLive = ContextManager.shared.isWeatherLiveData
       // MARK: Speed Normalization
       // OBD-II speed is stored in km/h.
       // GPS speed is stored in m/s.
@@ -1269,7 +1270,21 @@ public class BackgroundCaptureService:
       // during a perfectly gentle stop. drivingConfirmed already has
       // its own 45s grace period for brief stops, so that alone is the
       // right signal for "is this trip still active".
-      let riskActive = self.drivingConfirmed
+      // MARK: Required-Source Gate
+      // All four sources, OBD-II, wearable, front camera, and rear camera,
+      // must be connected for risk estimation to run, for the whole
+      // session and not only at its start. Losing any one, at any point,
+      // pauses risk output until it reconnects, rather than falling back
+      // to a score fused from whatever evidence remains.
+      var waiting: [String] = []
+      if !obdFresh { waiting.append("OBD-II adapter") }
+      if !(self.isWhoopConnected || self.isAmazfitConnected) { waiting.append("wearable") }
+      if snapshot.cameraStatus != "running" { waiting.append("camera") }
+      DispatchQueue.main.async { [weak self] in
+        self?.waitingForSources = waiting
+      }
+
+      let riskActive = self.drivingConfirmed && waiting.isEmpty
       // MARK: Speed-Change Acceleration
       var obdAccel = 0.0
       if let previous = self.lastSpeedMps,
@@ -1295,10 +1310,15 @@ public class BackgroundCaptureService:
         gyroMag: snapshot.gyroMag ?? 0.0,
         speedKmh: speedKmh,
         accelObd: obdAccel,
-        rpm: snapshot.rpm ?? 0.0,
-        throttle: snapshot.throttlePosition ?? 0.0,
-        load: snapshot.engineLoad ?? 0.0,
-        hr: snapshot.heartRate ?? 0.0,
+        // Passed through as true optionals, NOT collapsed to 0.0 here --
+        // an unconnected OBD adapter or wearable must read as genuinely
+        // missing to RoadSenseOnDeviceRiskEngine, not as "reading zero",
+        // which for RPM/throttle/engine load would otherwise look like a
+        // stopped engine while the car is actually moving.
+        rpm: snapshot.rpm,
+        throttle: snapshot.throttlePosition,
+        load: snapshot.engineLoad,
+        hr: snapshot.heartRate,
         eyesOnRoad: snapshot.eyesOnRoad,
         eyesClosedSec: snapshot.eyesClosedSec,
         trafficLevel: snapshot.trafficLevel,
@@ -1312,7 +1332,8 @@ public class BackgroundCaptureService:
           ContextManager.shared.weatherConditionCode,
         designSpeed:
           ContextManager.shared.designSpeed,
-        isDriving: riskActive
+        isDriving: riskActive,
+        postureCollapse: snapshot.postureCollapse
       )
       let risk = breakdown.total
       // MARK: Multimodal Risk Fusion (master directive section 6)
@@ -1699,15 +1720,12 @@ public class BackgroundCaptureService:
           self.isWhoopConnected = true
         }
       }
-      if let rr = rrInterval {
-        self.currentFrame.rrIntervalMs = rr
-      }
     }
   }
   // MARK: Amazfit Telemetry
-  // Merges into the SAME currentFrame.heartRate/rrIntervalMs fields WHOOP
-  // uses -- this app has no per-sensor source attribution for physiology
-  // readings today (a pre-existing limitation, not introduced here; see
+  // Merges into the SAME currentFrame.heartRate field WHOOP uses -- this
+  // app has no per-sensor source attribution for physiology readings
+  // today (a pre-existing limitation, not introduced here; see
   // Phase 15's progress notes). Do not assume WHOOP and Amazfit running
   // simultaneously produces a sensible merged reading -- untested.
   public func didUpdateAmazfit(
@@ -1726,9 +1744,6 @@ public class BackgroundCaptureService:
         DispatchQueue.main.async {
           self.isAmazfitConnected = true
         }
-      }
-      if let rr = rrInterval {
-        self.currentFrame.rrIntervalMs = rr
       }
     }
   }

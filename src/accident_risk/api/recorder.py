@@ -223,7 +223,7 @@ class SessionRecorder:
             alert_due = now - self._last_alert.get(frame.stream_id, 0.0) >= ALERT_COOLDOWN_SECONDS
 
         if due:
-            # SensorFrame carries m/s; the interface and research export show km/h.
+            # SensorFrame carries m/s; the interface shows km/h.
             speed_kmh = frame.vehicle_speed * 3.6 if frame.vehicle_speed is not None else None
             self.db.add_point(
                 session_id,
@@ -240,7 +240,7 @@ class SessionRecorder:
                     "longitude": frame.gps_longitude,
                 },
             )
-            self._add_research_sample(session_id, frame, prediction, camera, speed_kmh)
+            self._record_full_sample(session_id, frame, prediction, camera, speed_kmh)
 
         if prediction is None or prediction.overall_risk_index is None or not alert_due:
             return
@@ -286,7 +286,7 @@ class SessionRecorder:
             return "unresolved:none_assigned"
         return "unresolved:ambiguous(" + ",".join(sorted(d["identifier"] for d in candidates)) + ")"
 
-    def _add_research_sample(
+    def _record_full_sample(
         self,
         session_id: int,
         frame: SensorFrame,
@@ -294,19 +294,13 @@ class SessionRecorder:
         camera: dict[str, Any],
         speed_kmh: float | None,
     ) -> None:
-        """Append the research-grade record (recording/export milestone) alongside
-        the throttled track point. Missing readings stay None/absent -- never
-        coerced to zero -- and sensor_timestamps preserves each sensor's original
-        observation time, independent of when this frame itself arrived.
-
-        Gated on this participant's OWN research consent -- separate from, and
-        never implied by, any family-monitoring consent (not yet built). A
-        revocation stops future samples starting here; it does not delete
-        rows already written while consent was active. session_points (the
-        core dashboard/live-map feature) is written regardless -- consent
-        gates the extra research-grade record, not core safety recording."""
+        """Append the full per-frame record alongside the throttled track point.
+        Unconditional -- every session gets this, there is no consent gate.
+        Missing readings stay None/absent -- never coerced to zero -- and
+        sensor_timestamps preserves each sensor's original observation time,
+        independent of when this frame itself arrived."""
         session = self.db.get_session(session_id)
-        if session is None or not self.db.get_research_consent(session["user_id"])["granted"]:
+        if session is None:
             return
         device_id = self._resolve_device_id(session["user_id"], frame.source)
 
@@ -319,11 +313,6 @@ class SessionRecorder:
             "rpm": frame.rpm,
             "throttle_position": frame.throttle_position,
             "engine_load": frame.engine_load,
-            "steering_angle": frame.steering_angle,
-            "tire_pressure_fl": frame.tire_pressure_fl,
-            "tire_pressure_fr": frame.tire_pressure_fr,
-            "tire_pressure_rl": frame.tire_pressure_rl,
-            "tire_pressure_rr": frame.tire_pressure_rr,
             "accel_x": frame.accel_x, "accel_y": frame.accel_y, "accel_z": frame.accel_z,
             "gyro_x": frame.gyro_x, "gyro_y": frame.gyro_y, "gyro_z": frame.gyro_z,
             "gps_latitude": frame.gps_latitude,
@@ -336,16 +325,27 @@ class SessionRecorder:
             "rr_interval_ms": frame.rr_interval_ms,
             "physiology_signal_quality": frame.physiology_signal_quality,
             "sensor_timestamps": frame.sensor_timestamps,
+            # Weather context -- see ContextManager.swift. weather_is_live is
+            # always False right now: no real OpenWeather API key is
+            # configured, so this is always the CLEAR/1.0 "unknown" default,
+            # never fabricated as an observed reading.
+            "weather_multiplier": camera.get("weather_multiplier"),
+            "weather_condition_code": camera.get("weather_condition_code"),
+            "weather_is_live": camera.get("weather_is_live"),
+            # Discrete states and raw pose diagnostics behind the booleans
+            # above -- see DriverAttentionState.swift (Phase 2),
+            # ForwardCollisionHazard.swift (Phase 6), PedestrianHazard.swift
+            # (Phase 7). debug_pitch/yaw/roll/ear are the raw head-pose/eye-
+            # aspect-ratio readings the attention classification is built
+            # from, included so the reasoning behind an attention state is
+            # reconstructable later, not just its final label.
             "eyes_on_road": camera.get("eyes_on_road"),
-            # Discrete states behind the three booleans above -- see
-            # DriverAttentionState.swift (Phase 2), ForwardCollisionHazard.swift
-            # (Phase 6), and PedestrianHazard.swift (Phase 7). Added to the
-            # research export so the richer signal isn't lost for sessions
-            # recorded after those features shipped; older sessions simply
-            # have these as null, same as any other sensor that wasn't
-            # present yet.
             "attention_state": camera.get("attention_state"),
             "eyes_closed_sec": camera.get("eyes_closed_sec"),
+            "debug_pitch": camera.get("debug_pitch"),
+            "debug_yaw": camera.get("debug_yaw"),
+            "debug_roll": camera.get("debug_roll"),
+            "debug_ear": camera.get("debug_ear"),
             "traffic_level": camera.get("traffic_level"),
             "pedestrians_detected": camera.get("pedestrians_detected"),
             "pedestrian_count": camera.get("pedestrian_count"),
@@ -368,26 +368,6 @@ class SessionRecorder:
                 "inference_latency_ms": prediction.inference_latency_ms,
             })
         self.db.add_sample(session_id, frame.timestamp, device_id, frame.source, payload)
-
-    def report_collision(
-        self, stream_id: str, latitude: float | None, longitude: float | None
-    ) -> dict[str, Any] | None:
-        """Raise a pending collision alert the driver may still cancel (FR10, FR11)."""
-        session_id = self.session_for(stream_id)
-        if session_id is None:
-            return None
-        session = self.db.get_session(session_id)
-        if session is None:
-            return None
-        return self.db.create_alert(
-            session["user_id"],
-            "collision",
-            session_id=session_id,
-            latitude=latitude,
-            longitude=longitude,
-            status="pending",
-            detail={"source": "manual_report"},
-        )
 
     def summarise(self, session_id: int) -> dict[str, Any]:
         """Compute the stored session summary from its track points (FR13.7)."""
