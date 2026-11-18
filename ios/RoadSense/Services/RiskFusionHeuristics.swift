@@ -18,10 +18,15 @@ import Foundation
 /// environment -- CoreML models aren't loadable outside an Xcode build --
 /// which is exactly why keeping this half separately testable matters).
 public struct RiskBreakdown: Equatable {
-  /// poliRisk * weatherMult -- the POLIDriving CoreML model's raw output,
+  /// (fiveSecondHazardProb * 100) * weatherMult -- the driver-held-out-
+  /// tested POLIDriving 5-second-ahead model's own output, scaled from its
+  /// native [0, 1] probability onto this engine's 0-99.9-ish scale and
   /// weather-adjusted. The ONE component here that is not a hand-
-  /// authored heuristic. VZCrash is intentionally NOT blended in here
-  /// (see `collisionSupportEvidence` below and
+  /// authored heuristic. The earlier current-instant classifier was
+  /// retired (see RoadSenseOnDeviceRiskEngine's class doc comment) because
+  /// it was never driver-held-out tested, so this is now the sole AI
+  /// foundation of the live score. VZCrash is intentionally NOT blended in
+  /// here (see `collisionSupportEvidence` below and
   /// RoadSenseOnDeviceRiskEngine.breakdown's doc comment) -- the
   /// capstone directive requires VZCrash not be a principal contributor
   /// to the predictive score.
@@ -31,12 +36,14 @@ public struct RiskBreakdown: Equatable {
   /// observability and for collision-pathway use ONLY. Not included in
   /// `total` -- see mlFusionBase's doc comment.
   public var collisionSupportEvidence: Double = 0.0
-  /// The separately-trained 5-second-ahead POLIDriving model's own
-  /// hazard probability [0, 1], or nil when that model's input wasn't
-  /// available this frame. Reported as its own field, never folded into
-  /// `total` -- the directive wants both the current score AND an
-  /// experimental 5-second-ahead estimate reported separately, not
-  /// conflated into one number.
+  /// The same 5-second-ahead POLIDriving model's raw hazard probability
+  /// [0, 1] that feeds `mlFusionBase` above, or nil when that model's
+  /// input wasn't available this frame. Kept here (in addition to being
+  /// folded into mlFusionBase) because MultimodalRiskFusion.fuseMultimodalRisk
+  /// needs the raw, un-weather-adjusted probability to build its own
+  /// `fiveSecondAheadRisk` estimate -- see BackgroundCaptureService.swift
+  /// and MultimodalRiskFusion.swift, which is now the single authoritative
+  /// live score.
   public var fiveSecondAheadVehicleHazardProb: Double?
   public var jerkBoost: Double = 0.0
   public var hrVelocityBoost: Double = 0.0

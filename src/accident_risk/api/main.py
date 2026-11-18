@@ -14,7 +14,7 @@ from accident_risk.api.auth import AuthService
 from accident_risk.api.db import Database
 from accident_risk.api.notifications import MockNotificationSender
 from accident_risk.api.recorder import SessionRecorder
-from accident_risk.api.routes_app import FIVE_SECOND_ADVISORY_THRESHOLD, create_router, risk_level_for
+from accident_risk.api.routes_app import create_router, risk_level_for
 from accident_risk.inference.engine import InferenceEngine
 from accident_risk.logging_utils import configure_logging
 from accident_risk.models.fusion import RiskFusion
@@ -46,23 +46,6 @@ def optional_value(body: dict, *keys: str):
         if body.get(key) is not None:
             return body[key]
     return None
-
-
-def parse_five_second_ahead_risk(body: dict) -> float | None:
-    """Extract multimodal_risk.five_second_ahead_risk; never crash on a
-    missing/malformed field -- this key is a dashboard-only advisory,
-    not something inference correctness depends on."""
-    multimodal_risk = body.get("multimodal_risk")
-    if not isinstance(multimodal_risk, dict):
-        return None
-    value = multimodal_risk.get("five_second_ahead_risk")
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(number):
-        return None
-    return min(99.9, max(0.0, number))
 
 
 def parse_risk(body: dict) -> float | None:
@@ -332,9 +315,7 @@ def create_app(
                     # Dashboard-only, like everything else in this block;
                     # absent entirely when risk is inactive.
                     "risk_breakdown": body.get("risk_breakdown"),
-                    # Advisory-only; never gates collision detection or
-                    # family notification (see FIVE_SECOND_ADVISORY_THRESHOLD).
-                    "five_second_ahead_risk": parse_five_second_ahead_risk(body),
+                    "multimodal_risk": body.get("multimodal_risk"),
                 })
             elif source_tag in LEGACY_RUNNER_SOURCES:
                 state.update({
@@ -521,13 +502,12 @@ def create_app(
             result["cv_debug_roll"] = ui_data.get("debug_roll", 0.0)
             result["cv_debug_ear"] = ui_data.get("debug_ear", 0.0)
             result["risk_breakdown"] = ui_data.get("risk_breakdown")
-
-            five_second_ahead_risk = ui_data.get("five_second_ahead_risk")
-            result["five_second_ahead_risk"] = five_second_ahead_risk
-            result["five_second_advisory_active"] = (
-                five_second_ahead_risk is not None
-                and five_second_ahead_risk >= FIVE_SECOND_ADVISORY_THRESHOLD
-            )
+            # multimodal_risk.five_second_ahead_risk is no longer a separate
+            # advisory number -- it IS risk_score/risk_index now (see
+            # BackgroundCaptureService.swift). Still surfaced here, nested,
+            # purely for its component breakdown (vehicle/attention/road
+            # contributions, evidence_quality, dominant_factor).
+            result["multimodal_risk"] = ui_data.get("multimodal_risk")
 
             return result
 

@@ -40,7 +40,6 @@ let package = Package(
                 "App",
                 "Info.plist",
                 "RoadSense.entitlements",
-                "Models/FusionModel.mlpackage",
                 "Models/VZCrashModel.mlpackage",
                 "Models/PolidrivingFiveSecondModel.mlpackage",
                 "Models/DMDAttentionModel.mlpackage",

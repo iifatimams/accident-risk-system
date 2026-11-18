@@ -371,8 +371,7 @@ async function refreshDriver() {
   const roll = data.cv_debug_roll ?? null;
   const ear = data.cv_debug_ear ?? null;
   const riskBreakdown = data.risk_breakdown ?? null;
-  const fiveSecondRisk = data.five_second_ahead_risk ?? null;
-  const fiveSecondAdvisory = data.five_second_advisory_active ?? false;
+  const multimodalRisk = data.multimodal_risk ?? null;
 
   // snake_case wire values (DriverAttentionState.swift / ForwardCollisionHazard.swift /
   // PedestrianHazard.swift payloadValue) -> a short display label. Experimental
@@ -389,7 +388,8 @@ async function refreshDriver() {
       <strong>Pedestrian hazard (experimental):</strong> ${stateLabel(pedestrianHazardState)}<br>
       <strong>Lead vehicle closing:</strong> ${closingFast === null ? "Unavailable" : closingFast ? "Possible" : "Not detected"}<br>
       <strong>Forward hazard (experimental):</strong> ${stateLabel(forwardHazardState)}<br>
-      <strong>Near-term vehicle hazard (5s ahead, vehicle-only forecast)${fiveSecondAdvisory ? ' <span style="color:#e05a3a">⚠ ELEVATED</span>' : ""}:</strong> ${fiveSecondRisk === null ? "Unavailable" : `${num(fiveSecondRisk, 1)} / 99.9 (model score, not a crash probability)`}<br>
+      <strong>Risk score basis:</strong> the risk index above IS a 5-second-ahead forecast (vehicle model + live attention/road evidence), not a snapshot of right now.
+      ${multimodalRisk ? ` Dominant factor: ${stateLabel(multimodalRisk.dominant_factor)} (evidence quality ${num(multimodalRisk.evidence_quality, 2)}).` : ""}<br>
       <span style="opacity:0.7">
         -- raw diagnostics (for calibration) --<br>
         Face detected: ${faceDetected === null ? "n/a" : faceDetected ? "YES" : "NO"}<br>
@@ -574,7 +574,7 @@ async function refreshLive() {
 
   $("#live-list").innerHTML = drivers.length ? `
     <div class="table-wrap"><table>
-      <thead><tr><th>Driver</th><th>Risk</th><th>5s-ahead</th><th>Speed</th><th>Heart</th><th>Started</th></tr></thead>
+      <thead><tr><th>Driver</th><th>Risk</th><th>Speed</th><th>Heart</th><th>Started</th></tr></thead>
       <tbody>${drivers.map((d) => `
         <tr><td>${esc(d.driver_name)}</td>
         <td>${d.risk_active === false ? '<span class="pill">Not driving</span>'
@@ -582,9 +582,6 @@ async function refreshLive() {
       : d.risk_index !== null && d.risk_index !== undefined && d.risk_level
         ? `<span class="pill ${esc(d.risk_level.toLowerCase())}">${esc(d.risk_level)}</span>`
         : '<span class="pill">Analyzing</span>'}</td>
-        <td>${d.five_second_ahead_risk === null || d.five_second_ahead_risk === undefined ? '<span class="muted">—</span>'
-      : d.five_second_advisory_active ? `<span class="pill high">⚠ ${num(d.five_second_ahead_risk, 0)}</span>`
-      : `<span class="muted">${num(d.five_second_ahead_risk, 0)}</span>`}</td>
         <td class="num">${num(d.speed_kmh, 0)}</td>
         <td class="num">${num(d.heart_rate, 0)}</td>
         <td>${esc(clock(d.started_at))}</td></tr>`).join("")}

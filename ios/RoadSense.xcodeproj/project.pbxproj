@@ -9,11 +9,9 @@
 /* Begin PBXBuildFile section */
 		12B6442B040C25DAAC4F61D8 /* WhoopClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3FD78276CAC74B9BF729075 /* WhoopClient.swift */; };
 		31A5EFE48F7CEB8742DA52AB /* BackgroundCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6105DDE7FBFC679ABC34F27 /* BackgroundCaptureService.swift */; };
-		339290E3BAB84171F4963F70 /* Uploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2618A3749C6DF3CD570DA01 /* Uploader.swift */; };
 		3F93F91B3D2B83D6066B0A0D /* VZCrashModel.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 8AB20696F2C779ED07C24759 /* VZCrashModel.mlpackage */; };
 		4417BABDD29B010BEE1AC246 /* RoadSenseOnDeviceRiskEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D538130725141F482BE5790 /* RoadSenseOnDeviceRiskEngine.swift */; };
 		5D45900377FD5998DEA551FB /* SensorFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49EF4C4D47ACBC095254FB62 /* SensorFrame.swift */; };
-		7EADD7DC6C4FD1755DA7EB83 /* FusionModel.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 6D5DB04AA1F669FD237AABDE /* FusionModel.mlpackage */; };
 		A1B2C3D4E5F60718293A4B5C /* PolidrivingFiveSecondModel.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F60718293A4B5C6D7E /* PolidrivingFiveSecondModel.mlpackage */; };
 		B2C3D4E5F60718293A4B5C6D /* DMDAttentionModel.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F60718293A4B5C6D7E8F /* DMDAttentionModel.mlpackage */; };
 		E5F60718293A4B5C6D7E8F90 /* RoadObjectDetector.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = F60718293A4B5C6D7E8F9012 /* RoadObjectDetector.mlpackage */; };
@@ -45,7 +43,6 @@
 		4AA87CE96E00133D8BE1A265 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		560FCDD6F283C49A9440E7D8 /* CollisionDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollisionDetector.swift; sourceTree = "<group>"; };
 		6D538130725141F482BE5790 /* RoadSenseOnDeviceRiskEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoadSenseOnDeviceRiskEngine.swift; sourceTree = "<group>"; };
-		6D5DB04AA1F669FD237AABDE /* FusionModel.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = FusionModel.mlpackage; sourceTree = "<group>"; };
 		C3D4E5F60718293A4B5C6D7E /* PolidrivingFiveSecondModel.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = PolidrivingFiveSecondModel.mlpackage; sourceTree = "<group>"; };
 		D4E5F60718293A4B5C6D7E8F /* DMDAttentionModel.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = DMDAttentionModel.mlpackage; sourceTree = "<group>"; };
 		F60718293A4B5C6D7E8F9012 /* RoadObjectDetector.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = RoadObjectDetector.mlpackage; sourceTree = "<group>"; };
@@ -56,7 +53,6 @@
 		B34C54271C1E05B4A1698093 /* RoadSense.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RoadSense.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C99453FAE82A03FFD817DE49 /* ContextManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextManager.swift; sourceTree = "<group>"; };
 		CA3C40C49D9D4D4C83A699C1 /* CollisionIncidentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollisionIncidentStore.swift; sourceTree = "<group>"; };
-		D2618A3749C6DF3CD570DA01 /* Uploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Uploader.swift; sourceTree = "<group>"; };
 		D6105DDE7FBFC679ABC34F27 /* BackgroundCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundCaptureService.swift; sourceTree = "<group>"; };
 		F3FD78276CAC74B9BF729075 /* WhoopClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhoopClient.swift; sourceTree = "<group>"; };
 		FD0000000000000000000000 /* RoadSenseAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoadSenseAPI.swift; sourceTree = "<group>"; };
@@ -79,7 +75,6 @@
 		2978A2BD711881F8EAE2497E /* Models */ = {
 			isa = PBXGroup;
 			children = (
-				6D5DB04AA1F669FD237AABDE /* FusionModel.mlpackage */,
 				C3D4E5F60718293A4B5C6D7E /* PolidrivingFiveSecondModel.mlpackage */,
 				D4E5F60718293A4B5C6D7E8F /* DMDAttentionModel.mlpackage */,
 				F60718293A4B5C6D7E8F9012 /* RoadObjectDetector.mlpackage */,
@@ -149,7 +144,6 @@
 				C99453FAE82A03FFD817DE49 /* ContextManager.swift */,
 				A467DBCF058E04A56FC266CE /* ObdBleClient.swift */,
 				6D538130725141F482BE5790 /* RoadSenseOnDeviceRiskEngine.swift */,
-				D2618A3749C6DF3CD570DA01 /* Uploader.swift */,
 				F3FD78276CAC74B9BF729075 /* WhoopClient.swift */,
 			);
 			path = Services;
@@ -232,7 +226,6 @@
 				8BEEC662796568A0B0E898E3 /* CollisionIncidentStore.swift in Sources */,
 				CF3807068F21948BC2DFFC47 /* ContentView.swift in Sources */,
 				E15D1B1A2F7486EBCF471B7D /* ContextManager.swift in Sources */,
-				7EADD7DC6C4FD1755DA7EB83 /* FusionModel.mlpackage in Sources */,
 				A1B2C3D4E5F60718293A4B5C /* PolidrivingFiveSecondModel.mlpackage in Sources */,
 				B2C3D4E5F60718293A4B5C6D /* DMDAttentionModel.mlpackage in Sources */,
 				E5F60718293A4B5C6D7E8F90 /* RoadObjectDetector.mlpackage in Sources */,
@@ -240,7 +233,6 @@
 				E23A9176625E3889C8EB7FC7 /* RoadSenseApp.swift in Sources */,
 				4417BABDD29B010BEE1AC246 /* RoadSenseOnDeviceRiskEngine.swift in Sources */,
 				5D45900377FD5998DEA551FB /* SensorFrame.swift in Sources */,
-				339290E3BAB84171F4963F70 /* Uploader.swift in Sources */,
 				3F93F91B3D2B83D6066B0A0D /* VZCrashModel.mlpackage in Sources */,
 				12B6442B040C25DAAC4F61D8 /* WhoopClient.swift in Sources */,
 			);

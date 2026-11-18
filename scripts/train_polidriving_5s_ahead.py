@@ -1,10 +1,14 @@
 """POLIDriving, 5-second-ahead hazardous-risk forecasting.
 
-train_polidriving.py (existing, unchanged) trains on the CURRENT-INSTANT
-risk_level label: "given these 14 features right now, what is the risk
-level right now." The capstone directive asks for a predictive target
-instead: "given these 14 features right now, what will the risk level
-be 5 seconds from now."
+A retired sibling script, train_polidriving.py, used to train on the
+CURRENT-INSTANT risk_level label: "given these 14 features right now, what
+is the risk level right now." It was removed because its train/test split
+was a plain random split, not driver-held-out, so its accuracy could never
+be honestly compared to this script's driver-held-out evaluation below.
+This script instead builds a predictive target: "given these 14 features
+right now, what will the risk level be 5 seconds from now" -- and its
+output (PolidrivingFiveSecondModel.mlpackage) is now the sole POLIDriving
+model deployed on-device.
 
 This script builds that target honestly, using only the 5 `_lab.csv`
 session files that carry a continuous per-row risk_level (found at:

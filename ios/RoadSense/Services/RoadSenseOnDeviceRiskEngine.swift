@@ -7,18 +7,21 @@ public final class RoadSenseOnDeviceRiskEngine {
     /// `collisionSupportEvidence`/`vzClassPred` below) -- never blended
     /// into the predictive risk magnitude. The capstone directive is
     /// explicit that VZCrash "must not be the principal contributor to
-    /// the predictive risk score"; before this change `mlFusionBase` was
-    /// `0.5*poliRisk + 0.5*vzRisk`, an EQUAL, not merely supporting,
-    /// weight. See RiskFusionHeuristics.swift's mlFusionBase doc comment
-    /// for the corrected formula.
+    /// the predictive risk score". See RiskFusionHeuristics.swift's
+    /// mlFusionBase doc comment for the current formula.
     private let vzcrashModel: VZCrashModel?
-    private let fusionModel: FusionModel?
-    /// POLIDriving's separately-trained 5-second-ahead hazard model
-    /// (scripts/train_polidriving_5s_ahead.py) -- same 14-feature input
-    /// contract as `fusionModel`, but trained to forecast risk_level 5
-    /// seconds ahead rather than classify the current instant. Reported
-    /// as its own `fiveSecondAheadRisk` output field, never blended into
-    /// `currentRisk`.
+    /// POLIDriving's 5-second-ahead hazard model
+    /// (scripts/train_polidriving_5s_ahead.py), driver-held-out tested
+    /// (0.918 ROC-AUC) -- the sole POLIDriving model deployed on-device.
+    /// The earlier current-instant classifier (scripts/train_polidriving.py
+    /// -> FusionModel.mlpackage) was retired: it was trained with a plain
+    /// random train_test_split, not a driver-held-out one, so its accuracy
+    /// could not be honestly compared to this one, and keeping two
+    /// separately-reported scores (an unvalidated "now" number and a
+    /// validated-but-ignored "+5s" number) was actively misleading. This
+    /// model's probability now feeds `mlFusionBase` directly, and
+    /// `MultimodalRiskFusion.fuseMultimodalRisk`'s `fiveSecondAheadRisk`
+    /// is the one authoritative live score (see BackgroundCaptureService.swift).
     private let fiveSecondModel: PolidrivingFiveSecondModel?
     // History buffers for proactive kinematics
     private var accelHistory: [(time: Double, val: Double)] = []
@@ -27,15 +30,11 @@ public final class RoadSenseOnDeviceRiskEngine {
     public init() {
         let config = MLModelConfiguration()
         self.vzcrashModel = try? VZCrashModel(configuration: config)
-        self.fusionModel = try? FusionModel(configuration: config)
         self.fiveSecondModel = try? PolidrivingFiveSecondModel(configuration: config)
 
         #if DEBUG
         if vzcrashModel == nil {
             print("[RoadSense] Failed to load VZCrashModel")
-        }
-        if fusionModel == nil {
-            print("[RoadSense] Failed to load FusionModel")
         }
         if fiveSecondModel == nil {
             print("[RoadSense] Failed to load PolidrivingFiveSecondModel")
@@ -161,7 +160,6 @@ public final class RoadSenseOnDeviceRiskEngine {
         var jerk: Double
         var hrVelocity: Double
         var vzRisk: Double
-        var poliRisk: Double
         var classPred: Int
         /// nil when the 5-second-ahead model failed to load or produced
         /// no prediction -- never defaulted to 0, which would silently
@@ -232,13 +230,9 @@ public final class RoadSenseOnDeviceRiskEngine {
             }
         }
 
-        // POLIDriving ML prediction (14 features) -- current-instant AND
-        // 5-second-ahead models share the exact same feature vector,
-        // since scripts/train_polidriving_5s_ahead.py was trained on the
-        // identical 14-column POLIDRIVING_FEATURES order/defaults as
-        // scripts/train_polidriving.py (same dataset, same loader
-        // conventions, only the TARGET differs -- current risk_level vs
-        // risk_level 5 seconds later).
+        // POLIDriving ML prediction (14 features) -- the 5-second-ahead
+        // model's feature vector, same POLIDRIVING_FEATURES order/defaults
+        // scripts/train_polidriving_5s_ahead.py was trained on.
         let hour = Double(Calendar.current.component(.hour, from: Date()))
         // Indices 5, 7, 9, 10, 11, 13 have no live sensor source on an
         // iPhone, so they fall back to the same defaults train_polidriving.py
@@ -260,12 +254,11 @@ public final class RoadSenseOnDeviceRiskEngine {
         // like an engine reading 0 RPM/0% throttle/0% load while the car is
         // actually moving at highway speed, a combination the model never
         // saw in training and that is not an honest "unknown" either. When
-        // any of the three is unavailable, both POLIDriving models are
+        // any of the three is unavailable, the POLIDriving model is
         // skipped entirely for this frame rather than fed a fabricated
-        // reading -- poliRisk/fiveSecondHazardProb stay at their
-        // "unavailable" values (0.0 / nil), the same convention the rest of
-        // this engine already uses for a component that cannot be scored.
-        var poliRisk = 0.0
+        // reading -- fiveSecondHazardProb stays at its "unavailable" value
+        // (nil), the same convention the rest of this engine already uses
+        // for a component that cannot be scored.
         var fiveSecondHazardProb: Double?
         if let rpm, let throttle, let load {
             let hrForModel = hr.map { $0 > 0 ? $0 : 75.0 } ?? 75.0
@@ -273,18 +266,6 @@ public final class RoadSenseOnDeviceRiskEngine {
                 hour, speedKmh, rpm, accelObd, throttle, 90.0, load,
                 hrForModel, weatherCode, 10.0, 0.0, 0.0, designSpeed, 0.0,
             ]
-
-            if let poliArray = try? MLMultiArray(shape: [14], dataType: .double) {
-                for (index, value) in features.enumerated() {
-                    poliArray[index] = NSNumber(value: value)
-                }
-                if let prediction = try? fusionModel?.prediction(features: poliArray) {
-                    let pMedium = prediction.classProbability[1 as Int64] ?? 0.0
-                    let pHigh = prediction.classProbability[2 as Int64] ?? 0.0
-                    let pVeryHigh = prediction.classProbability[3 as Int64] ?? 0.0
-                    poliRisk = (0.25 * pMedium) + (0.65 * pHigh) + (1.0 * pVeryHigh)
-                }
-            }
 
             if let fiveSecondArray = try? MLMultiArray(shape: [14], dataType: .double) {
                 for (index, value) in features.enumerated() {
@@ -298,7 +279,7 @@ public final class RoadSenseOnDeviceRiskEngine {
         }
 
         return MLComponents(
-            jerk: jerk, hrVelocity: hrVelocity, vzRisk: vzRisk, poliRisk: poliRisk,
+            jerk: jerk, hrVelocity: hrVelocity, vzRisk: vzRisk,
             classPred: classPred, fiveSecondHazardProb: fiveSecondHazardProb
         )
     }
@@ -312,19 +293,15 @@ public final class RoadSenseOnDeviceRiskEngine {
         gyroMag: Double, effectiveAccel: Double, inRoundabout: Bool, weatherMult: Double,
         postureCollapse: Bool = false
     ) -> RiskBreakdown {
-        // poliRisk is already a weighted sum of CoreML classProbability
-        // values, which for this exported RandomForestClassifier are
-        // vote percentages on a 0-100 scale (not 0-1 fractions) --
-        // confirmed by probing the bundled .mlpackage directly. Do not
-        // re-multiply by 100 here or the fused score saturates past the
-        // 99.9 clamp almost immediately on any nonzero medium/high class
-        // probability.
+        // fiveSecondHazardProb is a true [0, 1] probability (confirmed by
+        // probing PolidrivingFiveSecondModel.mlpackage directly -- this
+        // model's classProbability output sums to ~1.0, unlike the retired
+        // current-instant FusionModel, which summed to ~100). Scaling by
+        // 100 here keeps it on the same 0-99.9-ish scale the rest of this
+        // engine's heuristic bonuses already use.
         //
-        // vzRisk is DELIBERATELY NOT included in mlFusionBase. Before
-        // this change the formula was `0.5*poliRisk + 0.5*vzRisk` -- an
-        // EQUAL weight that made VZCrash a PRINCIPAL contributor to the
-        // predictive score, directly contradicting the capstone
-        // directive's explicit "VZCrash must not be the principal
+        // vzRisk is DELIBERATELY NOT included in mlFusionBase. The capstone
+        // directive is explicit that "VZCrash must not be the principal
         // contributor to the predictive risk score. Its primary
         // responsibility is detecting collision-related motion events
         // and supporting the post-impact safety system." VZCrash's
@@ -335,7 +312,7 @@ public final class RoadSenseOnDeviceRiskEngine {
         // is still returned in the breakdown (as `collisionSupportEvidence`)
         // purely for observability/debugging and for BackgroundCaptureService's
         // independent collision-discrimination use, never summed in.
-        let mlFusionBase = ml.poliRisk * weatherMult
+        let mlFusionBase = (ml.fiveSecondHazardProb ?? 0.0) * 100.0 * weatherMult
         var result = applyRiskHeuristics(
             mlFusionBase: mlFusionBase, jerk: ml.jerk, hrVelocity: ml.hrVelocity,
             trafficLevel: trafficLevel, pedestriansDetected: pedestriansDetected,

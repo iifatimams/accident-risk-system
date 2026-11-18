@@ -61,7 +61,7 @@ and the "after" state is what's deployed now.
 
 ### Complexity / cost tradeoff
 
-| | Vehicle-only path (`FusionModel`, `PolidrivingFiveSecondModel`) | Camera path (`DMDAttentionModel`, gaze-zone model) |
+| | Vehicle-only path (`PolidrivingFiveSecondModel`) | Camera path (`DMDAttentionModel`, gaze-zone model) |
 |---|---|---|
 | Model type | Small tree ensembles (random forest / gradient boosting) | MobileNetV3-Small image classifier (CoreML) |
 | Per-frame cost | Microsecond-scale CPU inference on ~14 scalar features | Full image classification per camera frame, plus Apple Vision's own face/landmark pipeline running in parallel |

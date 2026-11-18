@@ -43,45 +43,51 @@ def test_empty_partial_stale_and_zero(tmp_path):
     assert client.get("/api/v1/predict/live").status_code == 400
 
 
-def test_five_second_ahead_risk_reaches_dashboard_without_gating_alerts(tmp_path, monkeypatch):
-    """The on-device 5s-ahead vehicle-hazard score (already uploaded under
-    multimodal_risk.five_second_ahead_risk) must reach the dashboard and flip
-    the advisory flag at threshold, but must never affect collision_alert_id
-    or trigger a family notification -- it's an advisory signal only, kept
-    separate from CollisionDetector's pure IMU-threshold alerting path."""
+def test_multimodal_risk_reaches_dashboard_without_gating_alerts(tmp_path, monkeypatch):
+    """The on-device multimodal risk breakdown (vehicle/attention/road
+    contributions, dominant_factor, evidence_quality -- multimodal_risk in
+    the ingest payload) must reach the dashboard as explainability detail,
+    but must never affect collision_alert_id or trigger a family
+    notification -- the 5-second-ahead estimate IS risk_score itself now
+    (see BackgroundCaptureService.swift), kept separate from
+    CollisionDetector's pure IMU-threshold alerting path."""
     sent = []
     monkeypatch.setattr(
         "accident_risk.api.notifications.MockNotificationSender.send",
         lambda self, **kwargs: sent.append(kwargs) or "mock_sent",
     )
     client = TestClient(
-        create_app(InferenceEngine(), database_path=tmp_path / "test_five_second.sqlite3")
+        create_app(InferenceEngine(), database_path=tmp_path / "test_multimodal.sqlite3")
     )
     now = time.time()
     frame = dict(
         timestamp=now,
         source="ios",
-        stream_id="edge-five-second",
+        stream_id="edge-multimodal",
         risk_active=True,
-        risk_score=10,
-        multimodal_risk={"five_second_ahead_risk": 72.5},
+        risk_score=72.5,
+        multimodal_risk={
+            "current_risk": 70.0, "five_second_ahead_risk": 72.5,
+            "risk_level": "high", "vehicle_contribution": 40.0,
+            "attention_contribution": 20.0, "road_hazard_contribution": 10.0,
+            "contextual_adjustment": 0.0, "evidence_quality": 0.9,
+            "dominant_factor": "vehicle-dynamics",
+        },
     )
     response = client.post("/ingest", json=frame)
     assert response.status_code == 200
     assert response.json()["collision_alert_id"] is None
 
-    data = client.get("/api/v1/predict/live?stream_id=edge-five-second").json()
-    assert data["five_second_ahead_risk"] == 72.5
-    assert data["five_second_advisory_active"] is True
-    assert not sent  # advisory never notifies family
+    data = client.get("/api/v1/predict/live?stream_id=edge-multimodal").json()
+    assert data["multimodal_risk"]["dominant_factor"] == "vehicle-dynamics"
+    assert data["multimodal_risk"]["evidence_quality"] == 0.9
+    assert not sent  # the risk score never notifies family by itself
 
-    # A frame omitting the key must not crash, and must clear the advisory
-    # rather than hold a stale reading past this ingest.
+    # A frame omitting the key must not crash.
     quiet_frame = dict(frame, risk_score=5, multimodal_risk=None)
     assert client.post("/ingest", json=quiet_frame).status_code == 200
-    data = client.get("/api/v1/predict/live?stream_id=edge-five-second").json()
-    assert data["five_second_ahead_risk"] is None
-    assert data["five_second_advisory_active"] is False
+    data = client.get("/api/v1/predict/live?stream_id=edge-multimodal").json()
+    assert data["multimodal_risk"] is None
 
 
 def test_invalid_packets_and_reset(tmp_path):

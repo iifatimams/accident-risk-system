@@ -19,14 +19,14 @@ SESSION_TIMEOUT_SECONDS = 180.0
 EDGE_FRESHNESS_SECONDS = 10.0
 UNCONFIRMED_INCIDENT_TIMEOUT_SECONDS = 180.0
 
-# ios/RoadSense/Services/MultimodalRiskFusion.swift computes a separate
-# 5-second-ahead vehicle-hazard score (PolidrivingFiveSecondModel.mlpackage,
-# driver-held-out ROC-AUC 0.918 -- docs/FINAL_MULTIMODAL_RESULTS.md section
-# 2.1) on a 0-99.9 scale. It is an advisory signal only: it must never gate
-# collision detection or a family notification (those stay driven solely by
-# CollisionDetector's IMU threshold), and it is a model score, not a
-# calibrated "probability of an accident."
-FIVE_SECOND_ADVISORY_THRESHOLD = 60.0
+# ios/RoadSense/Services/MultimodalRiskFusion.swift's fiveSecondAheadRisk
+# (PolidrivingFiveSecondModel.mlpackage, driver-held-out ROC-AUC 0.918 --
+# docs/FINAL_MULTIMODAL_RESULTS.md section 2.1, blended with live
+# attention/road evidence) is now risk_score/risk_index itself, not a
+# second advisory number -- see BackgroundCaptureService.swift. It must
+# still never gate collision detection or a family notification (those
+# stay driven solely by CollisionDetector's IMU threshold), and it is a
+# model score, not a calibrated "probability of an accident."
 
 
 def has_sensor_values(fields: dict[str, Any]) -> bool:
@@ -559,12 +559,6 @@ def create_router(
                 fields = {}
 
             index, active = current_risk(stream_id, fields, now)
-            # Advisory-only vehicle-hazard forecast (see main.py's
-            # FIVE_SECOND_ADVISORY_THRESHOLD) -- never gates risk_active,
-            # risk_level, or any alert; purely a dashboard signal for the
-            # administrator live view.
-            edge_entry = edge_state.get(stream_id, {})
-            five_second_ahead_risk = edge_entry.get("five_second_ahead_risk")
             drivers.append(
                 {
                     "session_id": session["id"],
@@ -581,11 +575,6 @@ def create_router(
                     "longitude": fields.get("gps_longitude"),
                     "last_seen": last_seen,
                     "receiving": fresh and has_sensor_values(fields),
-                    "five_second_ahead_risk": five_second_ahead_risk,
-                    "five_second_advisory_active": (
-                        five_second_ahead_risk is not None
-                        and five_second_ahead_risk >= FIVE_SECOND_ADVISORY_THRESHOLD
-                    ),
                 }
             )
         database.log_access(principal.user_id, principal.role, "live")

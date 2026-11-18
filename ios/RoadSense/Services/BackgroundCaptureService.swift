@@ -1335,7 +1335,6 @@ public class BackgroundCaptureService:
         isDriving: riskActive,
         postureCollapse: snapshot.postureCollapse
       )
-      let risk = breakdown.total
       // MARK: Multimodal Risk Fusion (master directive section 6)
       // Groups the same breakdown components already computed above
       // into the three principal evidence dimensions, with
@@ -1373,6 +1372,17 @@ public class BackgroundCaptureService:
         fiveSecondVehicleHazardProb: breakdown.fiveSecondAheadVehicleHazardProb,
         contextualAdjustment: 0.0  // weather is already folded into mlFusionBase via weatherMult
       )
+      // The 5-second multimodal estimate (vehicle forecast + live
+      // attention/road evidence) is now the one authoritative risk score --
+      // breakdown.total is no longer reported as a second, competing
+      // number. The one exception: breakdown.hardOverrideApplied means
+      // eyes have been closed for 3+ seconds, an absolute safety tripwire
+      // (RiskFusionHeuristics.swift), not a competing prediction -- that
+      // floor must never be diluted by the multimodal blend, so it wins
+      // outright rather than being averaged in.
+      let risk = breakdown.hardOverrideApplied
+        ? breakdown.total
+        : (multimodalEstimate.fiveSecondAheadRisk ?? breakdown.total)
       // MARK: Server Payload
       var payload = snapshot.toDictionary()
       payload["risk_active"] = riskActive
