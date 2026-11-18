@@ -828,6 +828,22 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
           )
           self.leadTrack = tracks.filter { Self.vehicleClassLabels.contains($0.classLabel) }
             .max { $0.box.area < $1.box.area }
+          // Traffic density from the real YOLOv8n vehicle tracker's current
+          // track count -- the previous signal here was computed from the
+          // old generic-rectangle "is this a car" guess and was removed as
+          // fabricated when that guess was replaced by this real detector
+          // (see roadObjectDetector's doc comment above); nothing ever
+          // re-wired a replacement, so this stayed permanently "empty"
+          // regardless of actual traffic. Thresholds are a hand-picked
+          // heuristic, same as RiskFusionHeuristics.swift's own traffic
+          // scoring -- not fit to any dataset, since no dataset here labels
+          // "how many visible vehicles counts as moderate traffic."
+          switch tracks.count {
+          case 0: self.trafficLevel = "empty"
+          case 1...2: self.trafficLevel = "light"
+          case 3...4: self.trafficLevel = "moderate"
+          default: self.trafficLevel = "crowded"
+          }
         }
       }
       // .scaleFit letterboxes rather than center-cropping -- a dashcam-
