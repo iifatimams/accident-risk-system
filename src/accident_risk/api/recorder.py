@@ -346,6 +346,12 @@ class SessionRecorder:
             "debug_yaw": camera.get("debug_yaw"),
             "debug_roll": camera.get("debug_roll"),
             "debug_ear": camera.get("debug_ear"),
+            # Without this, a pitch/yaw/roll of 0 is ambiguous: "looking
+            # dead ahead" and "no face found this frame" are otherwise
+            # indistinguishable when reviewing a session's pose timeline
+            # after the fact.
+            "debug_face_detected": camera.get("debug_face_detected"),
+            "camera_status": camera.get("camera_status"),
             "traffic_level": camera.get("traffic_level"),
             "pedestrians_detected": camera.get("pedestrians_detected"),
             "pedestrian_count": camera.get("pedestrian_count"),

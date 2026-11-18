@@ -163,6 +163,7 @@ def test_full_sample_is_recorded_unconditionally_with_weather_and_pose(client, p
         "risk_active": True, "risk_score": 12.5,
         "vehicle_speed": 15.0, "heart_rate": 80,
         "debug_pitch": -0.3, "debug_yaw": 0.1, "debug_roll": 0.05, "debug_ear": 0.22,
+        "debug_face_detected": True, "camera_status": "active",
         "eyes_on_road": False, "eyes_closed_sec": 1.2,
         "weather_multiplier": 1.25, "weather_condition_code": 8.0, "weather_is_live": True,
     })
@@ -174,6 +175,8 @@ def test_full_sample_is_recorded_unconditionally_with_weather_and_pose(client, p
     assert sample["debug_yaw"] == 0.1
     assert sample["debug_roll"] == 0.05
     assert sample["debug_ear"] == 0.22
+    assert sample["debug_face_detected"] is True
+    assert sample["camera_status"] == "active"
     assert sample["eyes_on_road"] is False
     assert sample["eyes_closed_sec"] == 1.2
     assert sample["weather_multiplier"] == 1.25
