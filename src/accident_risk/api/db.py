@@ -693,9 +693,14 @@ class Database:
             return timed_out
 
     def list_alerts(
-        self, *, user_id: int | None = None, kind: str | None = None, limit: int = 100
+        self,
+        *,
+        user_id: int | None = None,
+        session_id: int | None = None,
+        kind: str | None = None,
+        limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """List alerts newest first, scoped to one driver or kind when given."""
+        """List alerts newest first, scoped to one driver, session, and/or kind when given."""
         query = (
             "SELECT a.*, u.name AS driver_name FROM alerts a JOIN users u ON u.id = a.user_id"
         )
@@ -703,6 +708,9 @@ class Database:
         if user_id is not None:
             clauses.append("a.user_id = ?")
             params.append(user_id)
+        if session_id is not None:
+            clauses.append("a.session_id = ?")
+            params.append(session_id)
         if kind is not None:
             clauses.append("a.kind = ?")
             params.append(kind)

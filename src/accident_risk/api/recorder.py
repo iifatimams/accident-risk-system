@@ -412,7 +412,7 @@ class SessionRecorder:
             "gap_count": len(gaps),
             "longest_gap_seconds": round(longest_gap, 1),
             "complete": longest_gap <= tolerance,
-            "alerts": len(self.db.list_alerts(user_id=session["user_id"], limit=1000)),
+            "alerts": len(self.db.list_alerts(session_id=session_id, limit=1000)),
         }
 
     def finish(self, session_id: int, stream_id: str, reason: str) -> dict[str, Any]:

@@ -146,6 +146,35 @@ def test_session_lifecycle_and_ingestion(client, people, monkeypatch):
     assert again_stop.json()["status"] == "no_active_session"
 
 
+def test_summary_alert_count_is_scoped_to_its_own_session(client, people, monkeypatch):
+    """Regression: summarise() must count a session's own alerts, not the
+    driver's lifetime total (recorder.py previously called
+    db.list_alerts(user_id=...) with no session filter)."""
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    headers = sign_in(client, "+971501110001")
+
+    first = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": first["stream_id"],
+        "accel_x": 25.0, "accel_y": 0.0, "accel_z": 5.0,
+    })
+    first_summary = client.post("/app/api/driver/session/stop", headers=headers).json()["summary"]
+    assert first_summary["alerts"] == 1
+
+    # A second, alert-free session must report 0 -- not the driver's
+    # now-growing lifetime count.
+    second = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "synthetic_test", "stream_id": second["stream_id"],
+        "vehicle_speed": 10,
+    })
+    second_summary = client.post("/app/api/driver/session/stop", headers=headers).json()["summary"]
+    assert second_summary["alerts"] == 0
+
+
 def test_full_sample_is_recorded_unconditionally_with_weather_and_pose(client, people, monkeypatch):
     """The full per-frame record has no consent gate -- every session gets
     one -- and carries the raw head-pose/eye diagnostics and weather context
