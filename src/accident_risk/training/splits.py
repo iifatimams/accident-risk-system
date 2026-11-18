@@ -54,17 +54,20 @@ def group_split(
     if len(set(identities)) < 3:
         raise ValueError("Need at least three independent groups after linking shared identifiers")
     idx = np.arange(len(groups))
+    # split by group identity, not by row, so one participant/trip never spans partitions
     trainval, test = next(
         GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed).split(
             idx, groups=identities
         )
     )
+    # validation carved out of train+val only, so test stays untouched until final scoring
     tr, val = next(
         GroupShuffleSplit(
             n_splits=1, test_size=validation_size / (1 - test_size), random_state=seed
         ).split(trainval, groups=identities[trainval])
     )
     train, validation = trainval[tr], trainval[val]
+    # belt-and-suspenders check: no identity should ever appear on both sides of a split
     for left, right in ((train, validation), (train, test), (validation, test)):
         if set(identities[left]) & set(identities[right]):
             raise AssertionError("Group leakage detected")

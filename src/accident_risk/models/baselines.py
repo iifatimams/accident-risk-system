@@ -35,6 +35,9 @@ def make_baseline(family: str, seed: int = 42) -> Pipeline:
         )
     else:
         raise ValueError(f"Unknown baseline: {family}")
+    # bundling imputer + scaler + classifier in one Pipeline means a single .fit(X_train) fits
+    # all three on the training fold only, and .transform()/.predict() on val/test/live data
+    # replays those same fitted statistics instead of refitting on them
     return Pipeline(
         [
             (

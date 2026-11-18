@@ -17,6 +17,8 @@ def physiology_features(window: Window, drop_threshold: float = 3) -> dict[str, 
         )
     _, rr = series(window, "rr_interval_ms")
     _, device_rmssd = series(window, "hrv_rmssd")
+    # prefer computing RMSSD from actual RR intervals; only fall back to a device-reported
+    # value when we don't have enough raw beats to compute it ourselves
     features["rmssd_ms"] = (
         float(np.sqrt(np.mean(np.diff(rr) ** 2)))
         if len(rr) >= 2

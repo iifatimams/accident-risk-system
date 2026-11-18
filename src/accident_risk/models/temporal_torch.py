@@ -32,6 +32,7 @@ class TemporalCNN(nn.Module):
         super().__init__()
         if channels < 1 or classes < 2 or hidden < 1:
             raise ValueError("Positive channels/hidden and at least two classes required")
+        # left-only padding keeps every conv causal — a timestep never sees future samples
         self.network = nn.Sequential(
             nn.ConstantPad1d((4, 0), 0),
             nn.Conv1d(channels, hidden, 5),

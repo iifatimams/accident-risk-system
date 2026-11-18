@@ -112,6 +112,7 @@ def main():
         X, y, test_size=0.20, random_state=42, stratify=y
     )
 
+    # fit the scaler on train only, then transform test with those same fitted stats
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
@@ -139,6 +140,8 @@ def main():
     print("Confusion Matrix:")
     print(confusion_matrix(y_test, y_pred))
 
+    # isolation forest only ever sees normal-driving rows from the train split,
+    # so it learns what "normal" looks like without any leakage from test
     print("\n  Fitting Isolation Forest on Normal Driving Baselines...")
     normal_data_scaled = X_train_scaled[y_train == 2]
     iso = IsolationForest(contamination=0.05, random_state=42)

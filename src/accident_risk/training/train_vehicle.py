@@ -170,6 +170,8 @@ def train(
         else (dataset.get("name") or "prepared")
     )
     options = config.get("training", {})
+    # split by participant/trip identity before anything is fit, so no group's data
+    # ever shows up in more than one of train/validation/test
     train_idx, val_idx, test_idx = group_split(
         groups,
         options.get("validation_size", 0.2),
@@ -196,6 +198,7 @@ def train(
             "target", "driver_state_risk" if physiology else "event_detection_score"
         )
         model = model_type(family, config.get("random_seed", 42), target, score_labels)
+        # fit (imputer/scaler/classifier together) on the train split only
         model.fit(
             X.iloc[train_idx],
             y[train_idx],
@@ -203,6 +206,7 @@ def train(
             configuration=config,
             class_weight=options.get("class_weight", "balanced"),
         )
+        # score candidate families on validation; test stays untouched until one model is picked
         validation = classification_metrics(
             y[val_idx],
             model.predict(X.iloc[val_idx]),
@@ -220,6 +224,7 @@ def train(
         models.append(model)
     if not models:
         raise ValueError("At least one baseline must be configured")
+    # pick the winner on validation performance, then touch test exactly once, for reporting only
     best = max(models, key=lambda m: comparisons[m.family][metric])
     test = classification_metrics(
         y[test_idx],

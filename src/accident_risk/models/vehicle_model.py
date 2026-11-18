@@ -44,6 +44,7 @@ class VehicleModel:
         class_weight: str | dict | None = "balanced",
     ) -> "VehicleModel":
         """Fit training data only; store feature contract, label mapping and configuration."""
+        # caller must pass the train split only here — imputer/scaler/classifier all fit on X
         if len(X) == 0 or X.isna().all().all():
             raise ValueError("No usable training features")
         labels = self.encoder.fit_transform(y)
@@ -75,6 +76,8 @@ class VehicleModel:
 
     def _matrix(self, X: pd.DataFrame) -> pd.DataFrame:
         """Reorder known features and reject a mismatched preprocessing contract."""
+        # same feature set/order at predict time as at fit time — this is what keeps
+        # training, replay, and live inference preprocessing identical
         if set(X.columns) != set(self.feature_names):
             raise ValueError("Feature schema does not match saved training feature list")
         return X.loc[:, self.feature_names]

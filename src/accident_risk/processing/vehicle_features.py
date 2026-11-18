@@ -21,6 +21,8 @@ def series(window: Window, field: str) -> tuple[np.ndarray, np.ndarray]:
 def statistics(name: str, times: np.ndarray, values: np.ndarray) -> dict[str, float]:
     """Population standard deviation and least-squares slope per second; NaN if absent."""
     keys = ("mean", "std", "min", "max", "delta", "slope")
+    # NaN on purpose when a sensor gave nothing this window — imputation is the model
+    # pipeline's job (fit on train only), not something to fake here
     if len(values) == 0:
         return {f"{name}_{key}": float("nan") for key in keys}
     centered = times - times.mean()
@@ -60,6 +62,7 @@ def vehicle_features(
     Vehicle speed takes priority at each observation time; GPS fills missing times.
     Raw acceleration includes gravity unless the upstream device has removed it.
     """
+    # GPS speed first, then let OBD vehicle_speed win at any shared timestamp (more reliable)
     gps = dict(zip(*series(window, "gps_speed"), strict=True))
     gps.update(dict(zip(*series(window, "vehicle_speed"), strict=True)))
     times = np.array(sorted(gps))

@@ -43,6 +43,8 @@ def classification_metrics(
             else None
         )
     defined = len(set(binary)) == 2
+    # roc_auc/pr_auc need both classes present in this partition — report None rather than
+    # a meaningless number if one class is missing
     return {
         "precision": float(precision),
         "recall": float(recall),
@@ -100,6 +102,7 @@ def event_metrics(
         interval = next(((a, b) for a, b in intervals if a <= timestamp <= b), None)
         if interval is None:
             continue
+        # crossing into a new exposure interval resets alarm state — no carry-over across gaps
         if interval != previous_interval:
             was_high = False
             last_alarm = -float("inf")
