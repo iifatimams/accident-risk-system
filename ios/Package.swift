@@ -44,7 +44,6 @@ let package = Package(
                 "Models/PolidrivingFiveSecondModel.mlpackage",
                 "Models/DMDAttentionModel.mlpackage",
                 "Models/RoadObjectDetector.mlpackage",
-                "Models/SensorFrame.swift",
                 "Services/BackgroundCaptureService.swift",
                 // CollisionDetector.swift and CollisionIncidentStore.swift
                 // were excluded here too, but both import only Foundation

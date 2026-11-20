@@ -114,12 +114,19 @@ public struct SensorFrame: Codable {
         if let s = gpsSpeed { dict["gps_speed"] = s }
         if let h = gpsHeading { dict["gps_heading"] = h }
         
+        if let ax = accelX { dict["accel_x"] = ax }
+        if let ay = accelY { dict["accel_y"] = ay }
+        if let az = accelZ { dict["accel_z"] = az }
+        if let gx = gyroX { dict["gyro_x"] = gx }
+        if let gy = gyroY { dict["gyro_y"] = gy }
+        if let gz = gyroZ { dict["gyro_z"] = gz }
+
         if let am = accelMag {
             dict["accel_mag"] = am
         } else if let ax = accelX, let ay = accelY, let az = accelZ {
             dict["accel_mag"] = sqrt(ax * ax + ay * ay + az * az)
         }
-        
+
         if let gm = gyroMag {
             dict["gyro_mag"] = gm
         } else if let gx = gyroX, let gy = gyroY, let gz = gyroZ {
