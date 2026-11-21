@@ -53,19 +53,17 @@ def test_api(models, tmp_path):
             "gps_speed": 12.5,
             "gps_heading": 1.2,
             "heart_rate": 74,
-            "spo2": 98,
         }
         assert client.post("/ingest", json=demo_frame).status_code == 200
 
         live = client.get("/api/v1/predict/live", params={"stream_id": "trip"}).json()
         assert live["status"] == "active"
         assert live["heart"] == 74
-        assert live["spo2"] == 98
         assert live["location"]["latitude"] == 25.1869
 
         # Out-of-range / malformed fields are rejected, not silently dropped.
         bad_ts = time.time()
-        assert client.post("/ingest", json=payload | {"timestamp": bad_ts, "spo2": 400}).status_code == 422
+        assert client.post("/ingest", json=payload | {"timestamp": bad_ts, "heart_rate": -5}).status_code == 422
         assert client.post(
             "/ingest", json=payload | {"timestamp": bad_ts, "gps_latitude": 200}
         ).status_code == 422

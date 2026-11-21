@@ -83,7 +83,7 @@ class LiveBuffer(DataSource):
             }
 
     def __iter__(self) -> Iterator:
-        """Drain what is available; never block waiting for HR or SpO2."""
+        """Drain what is available; never block waiting for slower physiology readings."""
         while True:
             with self._lock:
                 if not self._queue:

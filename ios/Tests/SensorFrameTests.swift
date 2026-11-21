@@ -46,4 +46,27 @@ final class SensorFrameTests: XCTestCase {
         XCTAssertNil(dict["accel_mag"])
         XCTAssertNil(dict["gyro_mag"])
     }
+
+    /// Regression: WhoopClient/AmazfitClient's didUpdate* delegate calls
+    /// already carried a real rrInterval from the standard BLE Heart Rate
+    /// Measurement characteristic, but SensorFrame never declared the
+    /// property and toDictionary() never sent it, so the backend's
+    /// already-correct RMSSD computation (physiology_features.py) never had
+    /// real RR intervals to work from.
+    func testToDictionaryIncludesRrIntervalWhenPresent() {
+        var frame = SensorFrame(streamId: "test-stream", timestamp: 100.0)
+        frame.rrIntervalMs = 812.5
+
+        let dict = frame.toDictionary()
+
+        XCTAssertEqual(dict["rr_interval_ms"] as? Double, 812.5)
+    }
+
+    func testToDictionaryOmitsRrIntervalWhenUnavailable() {
+        let frame = SensorFrame(streamId: "test-stream", timestamp: 100.0)
+
+        let dict = frame.toDictionary()
+
+        XCTAssertNil(dict["rr_interval_ms"])
+    }
 }

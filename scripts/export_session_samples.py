@@ -34,7 +34,7 @@ FIELDS = [
     "speed_kmh", "rpm", "throttle_position", "engine_load",
     "accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z",
     "gps_latitude", "gps_longitude", "gps_heading", "is_roundabout",
-    "heart_rate", "spo2", "hrv_rmssd", "rr_interval_ms", "physiology_signal_quality",
+    "heart_rate", "rr_interval_ms",
     "weather_multiplier", "weather_condition_code", "weather_is_live",
     "eyes_on_road", "attention_state", "eyes_closed_sec",
     "debug_pitch", "debug_yaw", "debug_roll", "debug_ear",

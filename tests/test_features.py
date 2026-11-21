@@ -37,12 +37,12 @@ def test_vehicle_statistics():
 
 def test_physiology_and_no_fake_hrv():
     frames = tuple(
-        SensorFrame(timestamp=t, stream_id="test", source="synthetic", heart_rate=60 + t, spo2=s)
-        for t, s in enumerate([99, 95, 94])
+        SensorFrame(timestamp=t, stream_id="test", source="synthetic", heart_rate=60 + t)
+        for t in range(3)
     )
     features = physiology_features(Window(0, 2, "test", frames))
     assert features["heart_rate_mean"] == 61
-    assert features["spo2_drop_count"] == 1
+    # No RR intervals at all this window -- HRV must stay NaN, never fabricated.
     assert math.isnan(features["rmssd_ms"])
     assert math.isnan(features["sdnn_ms"])
 

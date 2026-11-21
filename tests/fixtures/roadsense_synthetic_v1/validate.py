@@ -12,7 +12,7 @@ for scenario in manifest['scenario_list']:
     labels=list(csv.DictReader((ROOT/scenario['labels']).open()))
     assert len(frames)==len(labels)==401
     assert all(f['stream_id']==scenario['stream_id'] and f['source']=='synthetic_replay' for f in frames)
-    assert all(not any(key in f for key in ('heart_rate','rr_interval_ms','hrv_rmssd','spo2')) for f in frames)
+    assert all(not any(key in f for key in ('heart_rate','rr_interval_ms')) for f in frames)
     assert all(round(frames[k+1]['timestamp']-frames[k]['timestamp'],3)==0.1 for k in range(400))
     assert all(not any(key in f for key in ('lead_distance_m_truth','contact_now','event_in_next_5s')) for f in frames)
     for f,l in zip(frames,labels):

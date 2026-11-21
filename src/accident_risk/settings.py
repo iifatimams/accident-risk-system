@@ -21,17 +21,12 @@ class PipelineSettings(BaseModel):
     max_age_seconds: dict[str, float] = Field(
         default_factory=lambda: {
             "heart_rate": 30,
-            "spo2": 60,
-            "hrv_rmssd": 60,
             "rr_interval_ms": 5,
-            "physiology_signal_quality": 60,
             "gps_speed": 5,
             "gps_latitude": 5,
             "gps_longitude": 5,
         }
     )
-    physiology_quality_threshold: float = Field(0.5, ge=0, le=1)
-    spo2_drop_threshold: float = Field(3, gt=0)
     longitudinal_axis: str | None = None
     lateral_axis: str | None = None
     quality_fields: list[str] = Field(

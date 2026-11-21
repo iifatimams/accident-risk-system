@@ -96,7 +96,7 @@ def test_invalid_packets_and_reset(tmp_path):
     )
     packet = dict(timestamp=time.time(), source="test", stream_id="hardware")
     for update in (
-        {"spo2": 110},
+        {"heart_rate": -5},
         {"gps_latitude": 200},
         {"vehicle_speed": -1},
         {"timestamp": time.time() + 100},

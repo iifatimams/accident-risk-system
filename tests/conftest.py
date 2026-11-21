@@ -15,7 +15,7 @@ def settings():
     return PipelineSettings(
         vehicle_window_seconds=3,
         physiology_window_seconds=6,
-        max_age_seconds={"heart_rate": 2, "spo2": 3, "physiology_signal_quality": 3},
+        max_age_seconds={"heart_rate": 2, "rr_interval_ms": 3},
     )
 
 
@@ -35,7 +35,6 @@ def models(settings):
                     accel_y=0,
                     accel_z=9.8,
                     heart_rate=60 + 10 * (group % 2),
-                    physiology_signal_quality=1,
                 )
             )
             if snapshot:

@@ -320,10 +320,7 @@ class SessionRecorder:
             "gps_heading": frame.gps_heading,
             "is_roundabout": frame.is_roundabout,
             "heart_rate": frame.heart_rate,
-            "spo2": frame.spo2,
-            "hrv_rmssd": frame.hrv_rmssd,
             "rr_interval_ms": frame.rr_interval_ms,
-            "physiology_signal_quality": frame.physiology_signal_quality,
             "sensor_timestamps": frame.sensor_timestamps,
             # Weather context -- see ContextManager.swift. weather_is_live is
             # always False right now: no real OpenWeather API key is

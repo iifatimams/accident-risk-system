@@ -23,7 +23,7 @@ class ValidationReport:
 
 
 def validate_records(records: list[dict[str, Any] | SensorFrame]) -> ValidationReport:
-    """Reject NaN/infinity/range errors; report ordering, duplicates, and quality."""
+    """Reject NaN/infinity/range errors; report ordering and duplicates."""
     report = ValidationReport()
     last: dict[str, float] = {}
     seen: set[tuple[str, float, str]] = set()
@@ -46,8 +46,6 @@ def validate_records(records: list[dict[str, Any] | SensorFrame]) -> ValidationR
             if key in seen:
                 report.warnings.append(f"row {index}: repeated {sensor} observation")
             seen.add(key)
-        if frame.physiology_signal_quality is not None and frame.physiology_signal_quality < 0.5:
-            report.warnings.append(f"row {index}: low physiology signal quality")
         last[frame.stream_id] = frame.timestamp
         report.frames.append(frame)
     return report

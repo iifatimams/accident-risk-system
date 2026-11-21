@@ -63,7 +63,7 @@ def test_collision_detector_triggers_on_a_simulated_impact():
     assert suspicion.model_version == collision_detector.MODEL_VERSION
 
 
-def test_resample_is_causal_and_not_spo2_paced():
+def test_resample_is_causal_and_not_sensor_paced():
     frames = [
         frame(100, vehicle_speed=0, heart_rate=60),
         frame(100.5, vehicle_speed=10),
@@ -95,7 +95,7 @@ def test_staleness_conflicts_and_reports():
             frame(100, heart_rate=60),
             frame(100, heart_rate=60),
             frame(99),
-            {"timestamp": 104, "stream_id": "synthetic", "source": "test", "spo2": float("nan")},
+            {"timestamp": 104, "stream_id": "synthetic", "source": "test", "heart_rate": float("nan")},
         ]
     )
     assert not report.valid
@@ -140,12 +140,3 @@ def test_config_inheritance_and_cycles(tmp_path):
     (tmp_path / "base.yaml").write_text("extends: child.yaml\n")
     with pytest.raises(ValueError, match="cycle"):
         load_config(tmp_path / "child.yaml")
-
-
-def test_rejected_physiology_does_not_return_after_quality_expires():
-    pipeline = FeaturePipeline(
-        PipelineSettings(max_age_seconds={"heart_rate": 30, "physiology_signal_quality": 1})
-    )
-    pipeline.update(frame(100, heart_rate=100, physiology_signal_quality=0.1))
-    snapshot = pipeline.update(frame(102, vehicle_speed=10))
-    assert snapshot.frame.heart_rate is None

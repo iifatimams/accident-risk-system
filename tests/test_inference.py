@@ -24,7 +24,7 @@ def test_vehicle_only_and_no_models(models):
     assert empty.process(frame(101, vehicle_speed=10)).overall_risk_index is None
 
 
-def test_physiology_only_missing_spo2_staleness_and_combined(models):
+def test_physiology_only_staleness_and_combined(models):
     engine = InferenceEngine(models[0], models[1])
     engine.process(frame(100, heart_rate=70))
     physiological = engine.process(frame(101, heart_rate=72))
@@ -52,11 +52,11 @@ def test_live_and_replay_identical(models):
     ]
 
 
-def test_quality_order_and_contract(models, settings):
+def test_order_and_contract(models, settings):
     engine = InferenceEngine(*models)
-    engine.process(frame(100, heart_rate=70, physiology_signal_quality=1))
-    p = engine.process(frame(101, heart_rate=70, physiology_signal_quality=0.1, vehicle_speed=10))
-    assert p.driver_state_risk is None
+    engine.process(frame(100, heart_rate=70))
+    p = engine.process(frame(101, heart_rate=70, vehicle_speed=10))
+    assert p.driver_state_risk is not None
     assert p.event_detection_score is not None
     with pytest.raises(ValueError, match="order"):
         engine.process(frame(99))

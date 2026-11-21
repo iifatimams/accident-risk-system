@@ -23,10 +23,7 @@ UNITS = {
     "throttle_position": {"percent": 1, "fraction": 100},
     "engine_load": {"percent": 1, "fraction": 100},
     "heart_rate": {"bpm": 1},
-    "spo2": {"percent": 1, "fraction": 100},
-    "hrv_rmssd": {"ms": 1, "s": 1000},
     "rr_interval_ms": {"ms": 1, "s": 1000},
-    "physiology_signal_quality": {"fraction": 1, "percent": 0.01},
 }
 
 

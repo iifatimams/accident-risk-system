@@ -165,7 +165,10 @@ def create_app(
         )
 
     def ingest_frame(
-        frame: SensorFrame, direct_risk: float | None = None, edge_mode: bool = False
+        frame: SensorFrame,
+        direct_risk: float | None = None,
+        edge_mode: bool = False,
+        edge_latency_ms: float | None = None,
     ) -> PredictionResult | None:
         if not application.state.active:
             raise HTTPException(409, "Session is stopped; POST /session/start")
@@ -204,15 +207,29 @@ def create_app(
                 return None
             if direct_risk is not None:
                 risk_level = risk_level_for(direct_risk, database.get_settings())
+                quality_fields = engine.settings.quality_fields
+                # Same presence-fraction formula InferenceEngine.process() uses
+                # for its own data_quality -- real, computed from this frame's
+                # own fields, not a hardcoded "always perfect" placeholder.
+                data_quality = (
+                    sum(getattr(frame, field) is not None for field in quality_fields)
+                    / len(quality_fields)
+                    if quality_fields
+                    else 1.0
+                )
 
                 prediction = PredictionResult(
                     timestamp=frame.timestamp,
                     stream_id=target_stream,
                     overall_risk_index=direct_risk,
                     risk_level=risk_level,
-                    data_quality=1.0,
+                    data_quality=data_quality,
                     model_version="ios_coreml" if edge_mode else "terminal_fusion",
-                    inference_latency_ms=0.0,
+                    # The iPhone's own measured on-device prediction+fusion
+                    # time when it sent one (risk_computation_latency_ms);
+                    # 0.0 only when the client genuinely didn't report it,
+                    # never a stand-in for a real measurement.
+                    inference_latency_ms=edge_latency_ms if edge_latency_ms is not None else 0.0,
                 )
                 engine.latest[target_stream] = prediction
                 engine.latest[frame.stream_id] = prediction
@@ -362,9 +379,6 @@ def create_app(
                     gps_longitude=optional_value(body, "gps_longitude", "lon"),
                     heart_rate=(optional_value(body, "heart_rate", "instant_hr", "bpm") or None),
                     rr_interval_ms=body.get("rr_interval_ms"),
-                    spo2=body.get("spo2"),
-                    hrv_rmssd=body.get("hrv_rmssd"),
-                    physiology_signal_quality=body.get("physiology_signal_quality"),
                     sensor_timestamps=body.get("sensor_timestamps") or {},
                     accel_x=body.get("accel_x"),
                     accel_y=body.get("accel_y"),
@@ -386,8 +400,21 @@ def create_app(
             # matched by client_incident_id -- can be returned to the
             # caller, letting an offline-queued client learn the server-
             # side alert id once its upload finally succeeds.
+            edge_latency_ms = None
+            if edge_mode:
+                raw_latency = body.get("risk_computation_latency_ms")
+                if raw_latency is not None:
+                    try:
+                        edge_latency_ms = float(raw_latency)
+                    except (ValueError, TypeError) as exc:
+                        raise HTTPException(422, "Invalid risk_computation_latency_ms") from exc
+                    if not math.isfinite(edge_latency_ms) or edge_latency_ms < 0:
+                        raise HTTPException(422, "risk_computation_latency_ms is outside its expected range")
+
             collision_alert = recorder.check_collision(frame)
-            prediction = ingest_frame(frame, direct_risk=direct_risk, edge_mode=edge_mode)
+            prediction = ingest_frame(
+                frame, direct_risk=direct_risk, edge_mode=edge_mode, edge_latency_ms=edge_latency_ms
+            )
             return {
                 "status": "ok",
                 "stream_id": stream_id,
@@ -472,8 +499,6 @@ def create_app(
                 "throttle": fields["throttle_position"],
                 "engine_load": fields["engine_load"],
                 "heart": fields["heart_rate"],
-                "spo2": fields["spo2"],
-                "quality": fields["physiology_signal_quality"],
                 "heading": fields["gps_heading"],
                 "location": {
                     "latitude": fields["gps_latitude"],

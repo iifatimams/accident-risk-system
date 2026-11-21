@@ -17,12 +17,7 @@ pipeline:
     gps_longitude: 5
     gps_speed: 5
     heart_rate: 30
-    spo2: 60
-    hrv_rmssd: 60
     rr_interval_ms: 5
-    physiology_signal_quality: 60
-  physiology_quality_threshold: 0.5
-  spo2_drop_threshold: 3
   # Device axes are NOT anatomical axes unless mounting is verified.
   longitudinal_axis: null
   lateral_axis: null

@@ -14,7 +14,6 @@ def test_optional_and_units():
         stream_id="test",
         source="synthetic",
         heart_rate=72,
-        spo2=98,
     )
     assert frame.accel_x is None
     assert frame.heart_rate == 72
@@ -23,7 +22,7 @@ def test_optional_and_units():
 @pytest.mark.parametrize(
     "values",
     [
-        {"spo2": 400},
+        {"rr_interval_ms": -1},
         {"heart_rate": -1},
         {"heart_rate": 400},
         {"vehicle_speed": -1},

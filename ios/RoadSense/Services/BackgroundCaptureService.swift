@@ -1317,6 +1317,12 @@ public class BackgroundCaptureService:
       self.lastSpeedSource = speedSource
       self.lastTime = now
       // MARK: On-Device Core ML Prediction
+      // Real elapsed time for the on-device prediction+fusion span below
+      // (CoreML inference through RiskFusionHeuristics/MultimodalRiskFusion),
+      // sent up as risk_computation_latency_ms so the backend's
+      // inference_latency_ms reflects an actual measurement in edge_mode
+      // instead of a hardcoded placeholder -- never a fabricated value.
+      let riskComputeStart = CFAbsoluteTimeGetCurrent()
       // Phase 9.1: predictRiskBreakdown (not predictRisk) so the
       // interpretable components -- raw ML fusion vs. each hand-authored
       // heuristic adjustment -- are available to send to the dashboard,
@@ -1399,9 +1405,11 @@ public class BackgroundCaptureService:
       let risk = breakdown.hardOverrideApplied
         ? breakdown.total
         : (multimodalEstimate.fiveSecondAheadRisk ?? breakdown.total)
+      let riskComputeLatencyMs = (CFAbsoluteTimeGetCurrent() - riskComputeStart) * 1000.0
       // MARK: Server Payload
       var payload = snapshot.toDictionary()
       payload["risk_active"] = riskActive
+      payload["risk_computation_latency_ms"] = riskComputeLatencyMs
       // Dashboard-only explainability, same status as camera_status/debug_*
       // elsewhere in this payload -- NOT part of the validated SensorFrame
       // schema, and the index itself remains experimental/uncalibrated
@@ -1746,6 +1754,12 @@ public class BackgroundCaptureService:
           self.isWhoopConnected = true
         }
       }
+      // Real per-beat RR/IBI from the strap's own BLE packet -- never
+      // derived from heartRate. Independent of the `hr > 0` guard above:
+      // a packet can carry a valid RR interval field.
+      if let rr = rrInterval, rr > 0 {
+        self.currentFrame.rrIntervalMs = rr
+      }
     }
   }
   // MARK: Amazfit Telemetry
@@ -1770,6 +1784,9 @@ public class BackgroundCaptureService:
         DispatchQueue.main.async {
           self.isAmazfitConnected = true
         }
+      }
+      if let rr = rrInterval, rr > 0 {
+        self.currentFrame.rrIntervalMs = rr
       }
     }
   }

@@ -1,4 +1,4 @@
-"""Optional independent driver-state model; missing SpO2 is imputed during fitting."""
+"""Optional independent driver-state model; missing physiology readings are imputed during fitting."""
 
 from accident_risk.models.vehicle_model import VehicleModel
 

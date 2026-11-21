@@ -121,7 +121,6 @@ def test_session_lifecycle_and_ingestion(client, people, monkeypatch):
             "accel_y": 0,
             "accel_z": 9.8,
             "heart_rate": 70,
-            "physiology_signal_quality": 1,
             "gps_latitude": 25.3,
             "gps_longitude": 55.4,
         }
@@ -212,6 +211,57 @@ def test_full_sample_is_recorded_unconditionally_with_weather_and_pose(client, p
     assert sample["weather_condition_code"] == 8.0
     assert sample["weather_is_live"] is True
     assert sample["heart_rate"] == 80
+
+
+def test_edge_mode_reports_real_latency_and_data_quality_not_placeholders(client, people, monkeypatch):
+    """Regression: edge_mode (the deployed iOS CoreML path) used to hardcode
+    inference_latency_ms=0.0 and data_quality=1.0 regardless of what the
+    device actually measured or actually sent. The backend must now carry
+    through the device's own measured risk_computation_latency_ms, and
+    compute data_quality from this frame's own fields the same way
+    InferenceEngine.process() does for the non-edge path, not pretend every
+    frame is a perfect, instant reading."""
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    headers = sign_in(client, "+971501110001")
+    me = client.get("/app/api/me", headers=headers).json()
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+
+    # Only accel_x/y/z present of the quality_fields (accel_x/y/z, vehicle_speed)
+    # -- vehicle_speed deliberately omitted, so quality must read 3/4, not 1.0.
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": started["stream_id"],
+        "risk_active": True, "risk_score": 12.5,
+        "risk_computation_latency_ms": 7.25,
+        "accel_x": 1.0, "accel_y": 0.0, "accel_z": 9.8,
+    })
+    session_id = people.active_session(me["id"])["id"]
+    sample = people.session_samples(session_id)[0]
+    assert sample["inference_latency_ms"] == pytest.approx(7.25)
+    assert sample["data_quality"] == pytest.approx(0.75)
+
+
+def test_edge_mode_without_reported_latency_stays_zero_not_fabricated(client, people, monkeypatch):
+    """When the device genuinely doesn't report risk_computation_latency_ms,
+    the field stays 0.0 -- an honest "not measured", never backfilled with
+    a guessed number."""
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    headers = sign_in(client, "+971501110001")
+    me = client.get("/app/api/me", headers=headers).json()
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": started["stream_id"],
+        "risk_active": True, "risk_score": 12.5,
+    })
+    session_id = people.active_session(me["id"])["id"]
+    sample = people.session_samples(session_id)[0]
+    assert sample["inference_latency_ms"] == 0.0
 
 
 def test_drivers_only_see_their_own_sessions(client, people):

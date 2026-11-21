@@ -34,6 +34,13 @@ public struct SensorFrame: Codable {
     
     // Physiology (WHOOP)
     public var heartRate: Double?
+    // The actual RR/IBI interval read from the standard BLE Heart Rate
+    // Measurement characteristic (0x2A37) -- real per-beat hardware data,
+    // never derived from heartRate/bpm. This is what the backend's
+    // physiology_features.py RMSSD computation (rmssd_ms) is built to
+    // consume; hrvRmssd/SDNN are deliberately not computed on-device (see
+    // AmazfitClient.swift's own comment: no HRV is fabricated here).
+    public var rrIntervalMs: Double?
     public var isWhoopConnected: Bool = false
     // Phase 15: UNVERIFIED on physical hardware -- see AmazfitClient.swift.
     public var isAmazfitConnected: Bool = false
@@ -154,6 +161,7 @@ public struct SensorFrame: Codable {
         dict["heart_rate"] = hr
         dict["bpm"] = hr
         dict["hr"] = hr
+        if let rr = rrIntervalMs { dict["rr_interval_ms"] = rr }
         dict["whoop_connected"] = isWhoopConnected
         dict["amazfit_connected"] = isAmazfitConnected
         

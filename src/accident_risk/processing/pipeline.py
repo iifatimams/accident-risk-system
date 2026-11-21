@@ -6,7 +6,7 @@ from accident_risk.processing.physiology_features import physiology_features
 from accident_risk.processing.synchronization import Synchronizer
 from accident_risk.processing.vehicle_features import vehicle_features
 from accident_risk.processing.windows import RollingWindows, Window
-from accident_risk.schemas import PHYSIOLOGY_FIELDS, SensorFrame
+from accident_risk.schemas import SensorFrame
 from accident_risk.settings import PipelineSettings
 
 
@@ -43,19 +43,6 @@ class FeaturePipeline:
             for name, age in ages.items()
             if age > self.settings.max_age_seconds.get(name, self.settings.default_max_age_seconds)
         ]
-        quality = current.physiology_signal_quality
-        if quality is None:
-            flags.append("physiology_quality_unknown")
-        if quality is not None and quality < self.settings.physiology_quality_threshold:
-            flags.append("physiology_low_quality")
-            payload = current.model_dump()
-            for name in PHYSIOLOGY_FIELDS:
-                if name != "physiology_signal_quality":
-                    payload[name] = None
-                    payload["sensor_timestamps"].pop(name, None)
-                    # An expired quality flag must never resurrect rejected readings.
-                    self.synchronizer.values[frame.stream_id].pop(name, None)
-            current = SensorFrame(**payload)
         window = self.windows.update(current)
         if window is None:
             return None
@@ -73,7 +60,7 @@ class FeaturePipeline:
             vehicle_features(
                 vehicle_window, self.settings.longitudinal_axis, self.settings.lateral_axis
             ),
-            physiology_features(physiology_window, self.settings.spo2_drop_threshold),
+            physiology_features(physiology_window),
             ages,
             flags,
         )

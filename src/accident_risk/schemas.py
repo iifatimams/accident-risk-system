@@ -39,14 +39,9 @@ class SensorFrame(BaseModel):
     throttle_position: Percent | None = None
     engine_load: Percent | None = None
     heart_rate: Annotated[Finite, Field(gt=0, le=300)] | None = Field(None, description="bpm")
-    spo2: Percent | None = Field(None, description="percent")
-    hrv_rmssd: Annotated[Finite, Field(ge=0)] | None = Field(
-        None, description="ms, device-reported"
-    )
     rr_interval_ms: Annotated[Finite, Field(gt=0, le=10000)] | None = Field(
         None, description="Actual RR/IBI interval, ms; never derived from BPM"
     )
-    physiology_signal_quality: Score | None = None
     is_roundabout: bool | None = Field(None, description="True if vehicle is inside a roundabout")
     # A client-generated stable id for ONE specific collision-detector
     # trigger (see CollisionDetector.swift / collision_detector.py). Not a
@@ -75,10 +70,7 @@ SENSOR_FIELDS = tuple(
 )
 PHYSIOLOGY_FIELDS = (
     "heart_rate",
-    "spo2",
-    "hrv_rmssd",
     "rr_interval_ms",
-    "physiology_signal_quality",
 )
 
 
