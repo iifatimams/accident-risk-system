@@ -1,157 +1,38 @@
-# Accident Risk System
+# RoadSense: An Edge-Based Accident Risk Prediction System
 
-This repository is a Python research project for building, training, replaying, and serving vehicle-risk models from multi-source sensor telemetry. It combines pipeline code, dataset adapters, training scripts, API serving, and a lightweight Android client for local data capture and experimentation.
+RoadSense estimates how dangerous a drive is becoming, roughly five seconds before the fact, by combining vehicle dynamics, driver attention, and road hazards observed from a phone mounted inside the car. The phone reads vehicle telemetry over OBD-II, its own accelerometer and gyroscope, GPS, a front camera that watches the driver and a rear camera that watches the road, and, optionally, heart rate and RR intervals from a Bluetooth wearable. Four specialist models, each trained on its own dataset, turn these signals into one risk index between 0 and 99.9: a random forest trained on POLIDriving for the vehicle-dynamics forecast, a MobileNetV3 network trained on the Driver Monitoring Dataset for gaze and attention, a COCO-pretrained YOLOv8n detector for road objects, and a separate classifier trained on VZCrash that watches for an impact already in progress. The first three are combined through confidence-weighted late fusion into the live risk index; the fourth runs on an independent pathway that raises a collision alert and notifies a driver's family regardless of what the risk index was doing just before the event.
 
-Important note: this is a research and prototyping codebase, not a certified safety system. The project is designed to estimate risk from telemetry windows, not to claim a calibrated probability of a future crash.
+This repository holds both halves of that system: the iOS application that runs on the phone, and the Python backend that trains the models, validates the data pipeline, and serves recorded sessions to a driver, family, and administrator interface. It began as a capstone project, and the code still carries that history, most visibly in a `docs/` folder that records design decisions, checkpoints, and the limitations of each experiment as they were discovered rather than smoothed over afterward.
 
-## What is in this repo
+A caveat worth stating plainly: the fused risk index is a weighted combination of evidence, not a calibrated probability of a crash. One of this project's own findings was that no dataset exists linking vehicle dynamics, driver attention, and road hazards to real crash outcomes on the same drives, so the fused number cannot honestly be read as a percentage chance of an accident. Treat it as a warning signal, the way a cardiovascular risk score is a warning signal rather than a diagnosis.
 
-- `src/accident_risk/`: the core Python package
-  - `datasets/`: dataset adapters and schema inspection for real data sources
-  - `processing/`: feature extraction, synchronization, validation, and windowing
-  - `models/`: classical baselines, fusion, and optional deep learning models
-  - `training/`: split logic, training entry points, and evaluation helpers
-  - `inference/`: shared replay and inference runtime
-  - `sources/`: live and replay data sources
-  - `api/`: FastAPI service for ingestion, scoring, and dashboard backend
-- `scripts/`: runnable workflows for dataset prep, training, replay, and live service launch
-- `configs/`: YAML configs for model training, replay, and data preparation
-- `data/`: raw, interim, processed datasets, and recording capture samples
-- `android/`: Android project for mobile telemetry gathering / app integration
-- `tests/`: unit and integration tests using synthetic fixtures
-- `docs/`: architecture, data, hardware, verification, and repo tree notes
+## Layout
 
-## Repository tree
+The `ios/` directory contains the deployed application, a Swift package with its own Xcode project. The risk fusion logic, attention-state hysteresis, and collision heuristics live under `ios/RoadSense/Services` and are deliberately kept free of UIKit or CoreML dependencies wherever possible, so that the files implementing the actual decision logic can be unit tested with `swift test` on a plain Mac, separately from the parts of the app that only run inside a full Xcode build.
 
-```text
-accident-risk-system/
-├── android/
-│   ├── app/
-│   ├── gradle/
-│   ├── build.gradle.kts
-│   ├── settings.gradle.kts
-│   ├── gradlew
-│   └── gradlew.bat
-├── configs/
-│   ├── base.yaml
-│   ├── physiology.yaml
-│   ├── polidriving.yaml
-│   ├── replay.yaml
-│   └── vzcrash.yaml
-├── data/
-│   ├── raw/
-│   ├── interim/
-│   ├── processed/
-│   ├── recordings/
-│   └── app.sqlite3
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── DATASETS.md
-│   ├── INTERFACE.md
-│   ├── LIVE_SETUP.md
-│   ├── MODEL_LIMITATIONS.md
-│   └── VERIFICATION.md
-├── scripts/
-│   ├── evaluate.py
-│   ├── harvest_whoop.py
-│   ├── inspect_dataset.py
-│   ├── prepare_polidriving.py
-│   ├── prepare_vzcrash.py
-│   ├── replay.py
-│   ├── serve.py
-│   ├── stream_whoop_ble_csv.py
-│   ├── test_obd.py
-│   ├── train_physiology.py
-│   ├── train_vehicle.py
-│   └── ...
-├── src/
-│   └── accident_risk/
-│       ├── api/
-│       ├── datasets/
-│       ├── inference/
-│       ├── models/
-│       ├── processing/
-│       ├── sources/
-│       ├── training/
-│       ├── __init__.py
-│       ├── cli.py
-│       ├── logging_utils.py
-│       ├── schemas.py
-│       ├── settings.py
-│       └── synthetic.py
-├── tests/
-│   ├── conftest.py
-│   ├── test_api.py
-│   ├── test_datasets.py
-│   ├── test_features.py
-│   ├── test_inference.py
-│   ├── test_models.py
-│   ├── test_processing.py
-│   ├── test_replay.py
-│   ├── test_schemas.py
-│   ├── test_splits.py
-│   ├── test_training.py
-│   └── test_windows.py
-├── .env.example
-├── .gitignore
-├── AGENTS.md
-├── README.md
-├── pyproject.toml
-└── repomix-output.xml
-```
+The Python package under `src/accident_risk/` is the research and serving side: `schemas.py` defines the wire contract every sensor reading must satisfy; `processing/` holds the shared feature pipeline used identically in training, replay, and live inference, along with the validation and windowing logic that keeps a driver's windows from leaking across train and test splits; `models/` holds the classical baselines and the fusion logic; `training/` and `inference/` hold the entry points that fit and run those models; `datasets/` holds adapters for the public datasets the project is built on; and `api/` is the FastAPI service that ingests sensor frames, records sessions, and serves the driver, family, and administrator dashboards.
 
-## Quick start
+`scripts/` holds the runnable workflows: dataset preparation and inspection, training for each specialist model, CoreML export for on-device deployment, session replay, and a tool for pulling one recorded driving session back out of the database as a readable CSV. `configs/` holds the YAML files that describe each pipeline's windows, feature set, and training targets, with inheritance so a dataset-specific config only states what differs from the shared base. `data/` holds the SQLite database behind the live service, recorded telemetry, and the raw and processed dataset files, none of which are bundled with the repository since the underlying datasets are licensed separately. `artifacts/` holds trained models and their evaluation metrics. `synthetic_data/` holds a synthetic scenario generator used only to exercise the software's own logic in tests, never as evidence of real-world model performance. `tests/` covers both the Python package and, through the `ios/Tests` target, the parts of the Swift app that can run outside Xcode.
 
-### 1) Create the environment
+## Getting started
+
+To work on the Python side:
 
 ```bash
-cd /path/to/accident-risk-system
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e ".[dev]"
-```
-
-### 2) Run validation checks
-
-```bash
 ruff check .
-python -m pytest
+pytest
 ```
 
-### 3) Run the smoke test / replay workflow
+The backend can be run locally with `python scripts/serve.py`, which starts the FastAPI service that the iOS app talks to during a live session; it also serves the driver, family, and administrator web dashboards.
 
-```bash
-python scripts/serve.py
-# or a CLI replay workflow using the generated synthetic artifacts
-```
+To work on the iOS side, open `ios/RoadSense.xcodeproj` in Xcode and build onto a device or simulator as usual. The subset of the app's logic that has no UIKit, AVFoundation, or generated CoreML dependency can be tested on its own with `swift test` from inside `ios/`, which is the fastest way to check a change to the fusion or attention logic without a full device build.
 
-The repo contains synthetic test fixtures and smoke artifacts so the project can be exercised without downloading external datasets.
+## Working with the data and models
 
-## Data and model workflow
+Each specialist model is trained from its own public dataset through the same shape of pipeline: inspect the raw schema before writing any column mapping, since a dataset's actual columns are never assumed from its documentation alone; split by driver, vehicle, trip, or event rather than by row, so that no window from a held-out participant leaks into training; and apply the same feature definitions whether the data is coming from a training split, a replayed session, or a live stream, so a model never sees features at inference time that differ from what it was trained on. The configs in `configs/` describe these windows and feature sets explicitly, and `docs/DATASETS.md` records what is and is not known about each dataset's labeling and licensing before any mapping is written.
 
-This project is designed around a common pattern:
-
-1. Inspect raw dataset files and confirm their schema.
-2. Prepare data into a normalized format in `data/interim` or `data/processed`.
-3. Train vehicle / physiology models from controlled splits.
-4. Replay or serve predictions through the API and live dashboard.
-5. Evaluate metrics and save artifacts under `artifacts/`.
-
-Use the config files in `configs/` to define dataset mappings, logical timestamps, features, and model settings.
-
-## Important repo notes
-
-- Real datasets are not bundled in the repo; you must obtain/licence them separately.
-- `data/raw/` and any proprietary source data are kept read-only.
-- The data and model pipeline prioritizes proper grouping by participant, driver, vehicle, trip, and event.
-- Missing sensors should not crash inference, and physiology updates should not block faster vehicle/IMU processing.
-- Scores are experimental model outputs; they are not safety or crash-probability guarantees.
-
-## More documentation
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/DATASETS.md](docs/DATASETS.md)
-- [docs/LIVE_SETUP.md](docs/LIVE_SETUP.md)
-- [docs/MODEL_LIMITATIONS.md](docs/MODEL_LIMITATIONS.md)
-- [docs/VERIFICATION.md](docs/VERIFICATION.md)
+`docs/MODEL_LIMITATIONS.md` and `docs/ARCHITECTURE.md` are worth reading before extending either the fusion logic or the training pipeline: they record, in plain terms, where this system's evidence is thin, which components are genuinely validated against held-out drivers and which are still experimental, and why certain design choices, such as keeping the collision-detection pathway entirely separate from the predictive risk index, were made deliberately rather than incidentally.
