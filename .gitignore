@@ -35,6 +35,6 @@ ios/RoadSense.xcodeproj/project.xcworkspace/xcuserdata/
 
 # Live runtime database; mutates on every app run, not source or demo-fixture
 # data that belongs in version control.
-data/app.sqlite3
 data/app.sqlite3-shm
 data/app.sqlite3-wal
+data/backups/

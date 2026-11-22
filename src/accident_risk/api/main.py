@@ -125,6 +125,10 @@ def create_app(
     application.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     database = Database(database_path if database_path is not None else env.database)
+    # Any session still open at process start belongs to a PREVIOUS process
+    # (this one has no in-memory SessionRecorder registration for it) -- a
+    # crash, redeploy, or manual kill while recording, not a live trip.
+    database.recover_orphaned_sessions()
     auth = AuthService(database)
     recorder = SessionRecorder(database)
     bootstrap_administrator(database, env)
@@ -169,6 +173,7 @@ def create_app(
         direct_risk: float | None = None,
         edge_mode: bool = False,
         edge_latency_ms: float | None = None,
+        edge_vehicle_risk_score: float | None = None,
     ) -> PredictionResult | None:
         if not application.state.active:
             raise HTTPException(409, "Session is stopped; POST /session/start")
@@ -222,6 +227,12 @@ def create_app(
                     timestamp=frame.timestamp,
                     stream_id=target_stream,
                     overall_risk_index=direct_risk,
+                    # The vehicle-only POLIDriving 5s-ahead probability itself
+                    # (breakdown.fiveSecondAheadVehicleHazardProb on the
+                    # device) -- NOT the blended multimodal_risk forecast.
+                    # None (-> NULL) when the device didn't report one, never
+                    # a fabricated 0.
+                    vehicle_risk_score=edge_vehicle_risk_score,
                     risk_level=risk_level,
                     data_quality=data_quality,
                     model_version="ios_coreml" if edge_mode else "terminal_fusion",
@@ -333,6 +344,8 @@ def create_app(
                     # absent entirely when risk is inactive.
                     "risk_breakdown": body.get("risk_breakdown"),
                     "multimodal_risk": body.get("multimodal_risk"),
+                    "front_processing_latency_ms": body.get("front_processing_latency_ms"),
+                    "back_processing_latency_ms": body.get("back_processing_latency_ms"),
                 })
             elif source_tag in LEGACY_RUNNER_SOURCES:
                 state.update({
@@ -401,6 +414,7 @@ def create_app(
             # caller, letting an offline-queued client learn the server-
             # side alert id once its upload finally succeeds.
             edge_latency_ms = None
+            edge_vehicle_risk_score = None
             if edge_mode:
                 raw_latency = body.get("risk_computation_latency_ms")
                 if raw_latency is not None:
@@ -411,9 +425,23 @@ def create_app(
                     if not math.isfinite(edge_latency_ms) or edge_latency_ms < 0:
                         raise HTTPException(422, "risk_computation_latency_ms is outside its expected range")
 
+                raw_vehicle_risk_score = (body.get("risk_breakdown") or {}).get(
+                    "five_second_ahead_vehicle_hazard_prob"
+                )
+                if raw_vehicle_risk_score is not None:
+                    try:
+                        edge_vehicle_risk_score = float(raw_vehicle_risk_score)
+                    except (ValueError, TypeError) as exc:
+                        raise HTTPException(422, "Invalid five_second_ahead_vehicle_hazard_prob") from exc
+                    if not math.isfinite(edge_vehicle_risk_score) or not 0.0 <= edge_vehicle_risk_score <= 1.0:
+                        raise HTTPException(
+                            422, "five_second_ahead_vehicle_hazard_prob is outside its expected range"
+                        )
+
             collision_alert = recorder.check_collision(frame)
             prediction = ingest_frame(
-                frame, direct_risk=direct_risk, edge_mode=edge_mode, edge_latency_ms=edge_latency_ms
+                frame, direct_risk=direct_risk, edge_mode=edge_mode, edge_latency_ms=edge_latency_ms,
+                edge_vehicle_risk_score=edge_vehicle_risk_score,
             )
             return {
                 "status": "ok",

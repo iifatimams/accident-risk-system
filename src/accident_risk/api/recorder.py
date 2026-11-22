@@ -14,6 +14,7 @@ from typing import Any
 
 from accident_risk.api.db import Database
 from accident_risk.processing import collision_detector
+from accident_risk.processing.geo import trip_distance_km
 from accident_risk.schemas import PredictionResult, SensorFrame
 
 LOGGER = logging.getLogger("accident_risk")
@@ -21,6 +22,12 @@ LOGGER = logging.getLogger("accident_risk")
 # One track point per second is enough for history and the live map; raw frames
 # arrive far faster than that and belong in the research pipeline, not SQLite.
 POINT_INTERVAL_SECONDS = 1.0
+# A required source not observed for longer than this is a real interruption,
+# not ordinary inter-frame jitter -- opens a session_gaps row for that source.
+# Separate from PipelineSettings.max_age_seconds (that drives the non-edge
+# InferenceEngine's own staleness flags); this one applies uniformly on the
+# single path every frame -- edge or not -- actually flows through.
+REQUIRED_SOURCE_GAP_SECONDS = 10.0
 # Do not raise a second high-risk alert for the same driver inside this window.
 ALERT_COOLDOWN_SECONDS = 60.0
 # Do not flag a second automatic collision incident for the same stream
@@ -37,6 +44,15 @@ UNCONFIRMED_TIMEOUT_SECONDS = 180.0
 class SessionRecorder:
     """Persist track points and raise alerts for frames belonging to open sessions."""
 
+    # Required sources tracked for interruption/availability recording. Not
+    # every sensor RoadSense reads -- just the ones whose loss is meant to be
+    # visible as a session_gaps row rather than silently absent values. Rear
+    # (road-facing) camera is deliberately not tracked here: nothing in the
+    # current wire protocol distinguishes "rear camera off" from "rear camera
+    # sees no relevant object right now", so a presence signal for it would
+    # be guessed, not measured (see docs/MODEL_LIMITATIONS.md).
+    REQUIRED_SOURCES: tuple[str, ...] = ("vehicle", "gps", "front_camera", "wearable")
+
     def __init__(self, database: Database) -> None:
         self.db = database
         self._lock = RLock()
@@ -45,6 +61,9 @@ class SessionRecorder:
         self._last_alert: dict[str, float] = {}
         self._last_seen: dict[str, float] = {}
         self._last_collision_detection: dict[str, float] = {}
+        self._session_started: dict[str, float] = {}
+        self._source_last_seen: dict[tuple[str, str], float] = {}
+        self._open_gaps: dict[tuple[str, str], int] = {}
 
     def register(self, stream_id: str, session_id: int) -> None:
         """Begin recording frames for a stream."""
@@ -54,15 +73,54 @@ class SessionRecorder:
             self._last_alert.pop(stream_id, None)
             self._last_seen.pop(stream_id, None)
             self._last_collision_detection.pop(stream_id, None)
+            session = self.db.get_session(session_id)
+            self._session_started[stream_id] = session["started_at"] if session else time.time()
+            for source in self.REQUIRED_SOURCES:
+                self._source_last_seen.pop((stream_id, source), None)
+                self._open_gaps.pop((stream_id, source), None)
 
     def release(self, stream_id: str) -> None:
         """Stop recording frames for a stream."""
         with self._lock:
             for store in (
                 self._sessions, self._last_point, self._last_alert,
-                self._last_seen, self._last_collision_detection,
+                self._last_seen, self._last_collision_detection, self._session_started,
             ):
                 store.pop(stream_id, None)
+            for source in self.REQUIRED_SOURCES:
+                self._source_last_seen.pop((stream_id, source), None)
+                self._open_gaps.pop((stream_id, source), None)
+
+    @staticmethod
+    def _source_presence(frame: SensorFrame, camera: dict[str, Any]) -> dict[str, bool]:
+        """Whether each required source has a real reading on this frame."""
+        return {
+            "vehicle": frame.vehicle_speed is not None,
+            "gps": frame.gps_latitude is not None and frame.gps_longitude is not None,
+            "front_camera": camera.get("camera_status") not in (None, "idle"),
+            "wearable": frame.heart_rate is not None,
+        }
+
+    def _track_gaps(
+        self, session_id: int, stream_id: str, now: float, frame: SensorFrame, camera: dict[str, Any]
+    ) -> None:
+        """Open a session_gaps row the first time a required source has gone
+        unseen for longer than REQUIRED_SOURCE_GAP_SECONDS, and close it the
+        next time that source is seen again. Runs on every observed frame,
+        not just the throttled ~1Hz ones, so the gap boundary is timed by
+        the frame that actually ended/restored it."""
+        presence = self._source_presence(frame, camera)
+        for source, present in presence.items():
+            key = (stream_id, source)
+            if present:
+                self._source_last_seen[key] = now
+                gap_id = self._open_gaps.pop(key, None)
+                if gap_id is not None:
+                    self.db.record_gap_end(gap_id, now)
+                continue
+            baseline = self._source_last_seen.get(key, self._session_started.get(stream_id, now))
+            if key not in self._open_gaps and now - baseline > REQUIRED_SOURCE_GAP_SECONDS:
+                self._open_gaps[key] = self.db.record_gap_start(session_id, source, baseline)
 
     def session_for(self, stream_id: str) -> int | None:
         """Return the open session recording this stream, if any."""
@@ -222,6 +280,8 @@ class SessionRecorder:
                 self._last_point[frame.stream_id] = now
             alert_due = now - self._last_alert.get(frame.stream_id, 0.0) >= ALERT_COOLDOWN_SECONDS
 
+        self._track_gaps(session_id, frame.stream_id, now, frame, camera)
+
         if due:
             # SensorFrame carries m/s; the interface shows km/h.
             speed_kmh = frame.vehicle_speed * 3.6 if frame.vehicle_speed is not None else None
@@ -304,9 +364,15 @@ class SessionRecorder:
             return
         device_id = self._resolve_device_id(session["user_id"], frame.source)
 
-        thresholds = self.db.get_settings()
+        # The threshold actually in effect at THIS frame's own timestamp, not
+        # whatever the settings happen to be right now -- see
+        # Database.effective_thresholds_at and threshold_history.
+        thresholds = self.db.effective_thresholds_at(frame.timestamp)
         risk_index = prediction.overall_risk_index if prediction else None
         warning_fired = risk_index is not None and risk_index >= thresholds["risk_high_threshold"]
+
+        multimodal = camera.get("multimodal_risk") or {}
+        breakdown = camera.get("risk_breakdown") or {}
 
         payload: dict[str, Any] = {
             "speed_kmh": speed_kmh,
@@ -356,6 +422,28 @@ class SessionRecorder:
             "lead_closing_fast": camera.get("lead_closing_fast"),
             "forward_hazard_state": camera.get("forward_hazard_state"),
             "warning_fired": warning_fired,
+            "front_processing_latency_ms": camera.get("front_processing_latency_ms"),
+            "back_processing_latency_ms": camera.get("back_processing_latency_ms"),
+            # Vehicle-only vs camera-inclusive/fused, kept clearly distinct --
+            # see MultimodalRiskFusion.swift. The vehicle-only prediction
+            # itself is `prediction.vehicle_risk_score` below (set from
+            # breakdown.fiveSecondAheadVehicleHazardProb in main.py), not a
+            # separate field here; multimodal_risk.five_second_ahead_risk is
+            # a DIFFERENT, already-blended forecast (vehicle+attention+road),
+            # so it must never be read as the vehicle-only number. The three
+            # *_contribution fields are each dimension's weighted share of
+            # the fused overall_risk_index, so that number can be decomposed
+            # back into vehicle/attention/road-hazard evidence later.
+            "vehicle_contribution": multimodal.get("vehicle_contribution"),
+            "attention_contribution": multimodal.get("attention_contribution"),
+            "road_hazard_contribution": multimodal.get("road_hazard_contribution"),
+            "fusion_evidence_quality": multimodal.get("evidence_quality"),
+            "fusion_dominant_factor": multimodal.get("dominant_factor"),
+            # VZCrash's own collision-support classification -- supporting
+            # evidence for the independent impact pathway only, never a
+            # contributor to the predictive fused score (see
+            # RiskFusionHeuristics.swift's own doc comment on this field).
+            "collision_support_evidence": breakdown.get("collision_support_evidence"),
         }
         if prediction is not None:
             payload.update({
@@ -383,21 +471,47 @@ class SessionRecorder:
         hearts = [p["heart_rate"] for p in points if p["heart_rate"] is not None]
         started = session["started_at"]
         ended = session["ended_at"] or (points[-1]["ts"] if points else started)
+        duration = max(ended - started, 0.0)
         levels: dict[str, int] = {}
         for point in points:
             if point["risk_level"]:
                 levels[point["risk_level"]] = levels.get(point["risk_level"], 0) + 1
         # Points are ~1 s apart, so counting them approximates seconds.
         idling = sum(1 for p in points if p["speed_kmh"] is not None and p["speed_kmh"] < 1)
-        distance_km = sum(speeds) / 3600.0 if speeds else 0.0
+        # GPS-derived distance -- see processing/geo.py for exclusion rules
+        # (invalid fixes, GPS jumps, stationary drift). None, not 0, when
+        # fewer than two valid GPS fixes exist for this session.
+        distance_km = trip_distance_km(points)
         gaps = self.db.session_gaps(session_id)
         tolerance = self.db.get_settings()["session_gap_tolerance_seconds"]
         longest_gap = max(
             ((g["ended_at"] or ended) - g["started_at"] for g in gaps), default=0.0
         )
+        # Sensor availability from ACTUAL recorded interruption time per
+        # required source (session_gaps), not from counting nonempty cells --
+        # a source that was simply never wired up for a trip (e.g. no
+        # wearable worn) looks identical to one that silently stopped
+        # reporting if you only count empty cells; gap tracking distinguishes
+        # them by measuring observed presence over time instead.
+        gap_seconds_by_source: dict[str, float] = {}
+        for gap in gaps:
+            gap_seconds_by_source[gap["source"]] = gap_seconds_by_source.get(gap["source"], 0.0) + max(
+                (gap["ended_at"] or ended) - gap["started_at"], 0.0
+            )
+        sensor_availability_by_source = {
+            source: round(1.0 - min(gap_seconds_by_source.get(source, 0.0) / duration, 1.0), 4)
+            for source in SessionRecorder.REQUIRED_SOURCES
+        } if duration > 0 else {source: None for source in SessionRecorder.REQUIRED_SOURCES}
+        defined_availability = [v for v in sensor_availability_by_source.values() if v is not None]
+        overall_sensor_availability = (
+            round(sum(defined_availability) / len(defined_availability), 4)
+            if defined_availability else None
+        )
         return {
-            "duration_seconds": round(max(ended - started, 0.0), 1),
-            "distance_km": round(distance_km, 2),
+            "duration_seconds": round(duration, 1),
+            "distance_km": round(distance_km, 2) if distance_km is not None else None,
+            "distance_source": "gps",
+            "distance_calculation_method": "haversine_excluding_jumps_and_drift_v1",
             "max_speed_kmh": round(max(speeds), 1) if speeds else None,
             "mean_speed_kmh": round(sum(speeds) / len(speeds), 1) if speeds else None,
             "idling_seconds": idling,
@@ -410,10 +524,18 @@ class SessionRecorder:
             "longest_gap_seconds": round(longest_gap, 1),
             "complete": longest_gap <= tolerance,
             "alerts": len(self.db.list_alerts(session_id=session_id, limit=1000)),
+            "sensor_availability_by_source": sensor_availability_by_source,
+            "overall_sensor_availability": overall_sensor_availability,
         }
 
     def finish(self, session_id: int, stream_id: str, reason: str) -> dict[str, Any]:
         """Close a session, store its summary and flag it incomplete if gaps were long."""
+        now = time.time()
+        with self._lock:
+            for source in self.REQUIRED_SOURCES:
+                gap_id = self._open_gaps.pop((stream_id, source), None)
+                if gap_id is not None:
+                    self.db.record_gap_end(gap_id, now)
         summary = self.summarise(session_id)
         self.db.save_summary(session_id, summary)
         self.db.end_session(session_id, reason, complete=bool(summary.get("complete", True)))

@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +30,10 @@ from accident_risk.api.db import Database, normalise_phone  # noqa: E402
 # row's payload (older samples recorded before a field was added) renders
 # as an empty cell, never a fabricated 0/False.
 FIELDS = [
+    # session_id/driver_id identify the session and its actual driver
+    # through the existing sessions<->users relationship (db.py) -- not a
+    # separate identification scheme, and never invented at export time.
+    "session_id", "driver_id",
     "ts", "clock_utc", "device_id", "source",
     "speed_kmh", "rpm", "throttle_position", "engine_load",
     "accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z",
@@ -42,7 +46,13 @@ FIELDS = [
     "traffic_level", "pedestrians_detected", "pedestrian_count", "pedestrian_hazard_state",
     "lead_closing_fast", "forward_hazard_state",
     "warning_fired",
+    "front_processing_latency_ms", "back_processing_latency_ms",
     "event_detection_score", "vehicle_risk_score", "driver_state_risk",
+    # Vehicle-only vs camera-inclusive/fused, kept visibly distinct -- see
+    # MultimodalRiskFusion.swift and recorder.py's _record_full_sample.
+    "five_second_ahead_vehicle_hazard_prob",
+    "vehicle_contribution", "attention_contribution", "road_hazard_contribution",
+    "fusion_evidence_quality", "fusion_dominant_factor", "collision_support_evidence",
     "overall_risk_index", "risk_level", "data_quality", "model_version",
     "quality_flags", "sensor_age_seconds", "inference_latency_ms",
 ]
@@ -89,7 +99,9 @@ def main() -> None:
         writer.writeheader()
         for row in samples:
             row = dict(row)
-            row["clock_utc"] = datetime.fromtimestamp(row["ts"], tz=timezone.utc).isoformat()
+            row["session_id"] = session_id
+            row["driver_id"] = session["user_id"]
+            row["clock_utc"] = datetime.fromtimestamp(row["ts"], tz=UTC).isoformat()
             writer.writerow(row)
 
     driver_name = session.get("driver_name", f"user {session['user_id']}")

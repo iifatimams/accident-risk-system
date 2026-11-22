@@ -37,6 +37,11 @@ INCIDENT_LIFECYCLE: dict[str, tuple[str, ...]] = {
     "resolved": (),
 }
 FAMILY_LINK_STATUSES: tuple[str, ...] = ("requested", "accepted", "declined")
+# "unknown" is an explicitly-unreviewed window, never conflated with "safe"
+# (an evaluator looked and found nothing hazardous/distracted).
+GROUND_TRUTH_HAZARD_STATES: tuple[str, ...] = ("safe", "hazardous", "unknown")
+GROUND_TRUTH_ATTENTION_STATES: tuple[str, ...] = ("attentive", "distracted", "unknown")
+ALERT_VERIFICATION_RESULTS: tuple[str, ...] = ("correct", "false", "unreviewed")
 
 DEFAULT_SETTINGS: dict[str, float] = {
     "risk_medium_threshold": 0.40,
@@ -222,6 +227,72 @@ CREATE TABLE IF NOT EXISTS access_log (
     path          TEXT NOT NULL,
     ts            REAL NOT NULL
 );
+
+-- One row per *change* to the alert thresholds, not one row per prediction:
+-- a prediction's effective threshold is found by taking the most recent row
+-- with ts <= that prediction's own timestamp (see effective_thresholds_at).
+-- Seeded with one row at Database init time so every prediction, even the
+-- very first one ever recorded, has a threshold row to join against.
+CREATE TABLE IF NOT EXISTS threshold_history (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                      REAL NOT NULL,
+    risk_medium_threshold   REAL NOT NULL,
+    risk_high_threshold     REAL NOT NULL,
+    risk_critical_threshold REAL NOT NULL,
+    changed_by              INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_threshold_history_ts ON threshold_history(ts);
+
+-- Ground-truth labels for evaluation, entered by an authorized evaluator
+-- after the fact -- never derived from the model's own prediction, and
+-- kept entirely separate from the raw session_samples recording. Updating
+-- an annotation inserts a NEW row with a higher revision for the same
+-- (session_id, window_start_ts, window_end_ts) slot rather than overwriting
+-- the old one, so the full history survives; callers read only the
+-- highest-revision row per slot as "current" (see latest_annotations).
+CREATE TABLE IF NOT EXISTS evaluation_annotations (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id               INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    window_start_ts          REAL    NOT NULL,
+    window_end_ts            REAL    NOT NULL,
+    ground_truth_hazard      TEXT    NOT NULL,
+    ground_truth_distracted  TEXT    NOT NULL,
+    annotation_notes         TEXT    NOT NULL DEFAULT '',
+    annotator_id             INTEGER NOT NULL REFERENCES users(id),
+    annotated_at             REAL    NOT NULL,
+    revision                 INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(session_id, window_start_ts, window_end_ts, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_session ON evaluation_annotations(session_id, window_start_ts);
+
+-- Whether an authorized evaluator judged an actual alert event as a correct
+-- detection, a false alarm, or still unreviewed. Separate from the alert's
+-- own operational status/lifecycle (pending/confirmed/...), which is about
+-- what the DRIVER or an administrator did in the moment, not a post-hoc
+-- research verification. One row per alert; re-verifying updates it in
+-- place (no revision history requested for this one, unlike annotations).
+CREATE TABLE IF NOT EXISTS alert_verifications (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id             INTEGER NOT NULL UNIQUE REFERENCES alerts(id) ON DELETE CASCADE,
+    verification_result  TEXT    NOT NULL DEFAULT 'unreviewed',
+    verified_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    verified_at          REAL,
+    notes                TEXT    NOT NULL DEFAULT ''
+);
+
+-- Controlled, staged collision-detection tests (FR7 verification), kept
+-- entirely separate from real driving sessions/alerts -- a staged test must
+-- never be confused with or counted as an actual road collision.
+CREATE TABLE IF NOT EXISTS collision_tests (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    test_timestamp              REAL    NOT NULL,
+    scenario_type                TEXT    NOT NULL,
+    expected_collision_detection INTEGER NOT NULL,
+    actual_collision_detection   INTEGER NOT NULL,
+    detection_latency_ms         REAL,
+    notes                        TEXT    NOT NULL DEFAULT '',
+    recorded_by                   INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
 """
 
 
@@ -257,6 +328,23 @@ class Database:
             for key, value in DEFAULT_SETTINGS.items():
                 connection.execute(
                     "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (key, value)
+                )
+            # Seed one threshold_history row so a prediction recorded before
+            # any settings change still has a threshold to join against.
+            if connection.execute("SELECT 1 FROM threshold_history LIMIT 1").fetchone() is None:
+                current = {
+                    r["key"]: r["value"] for r in connection.execute("SELECT * FROM settings")
+                }
+                connection.execute(
+                    "INSERT INTO threshold_history"
+                    "(ts, risk_medium_threshold, risk_high_threshold, risk_critical_threshold, changed_by) "
+                    "VALUES (?, ?, ?, ?, NULL)",
+                    (
+                        time.time(),
+                        current.get("risk_medium_threshold", DEFAULT_SETTINGS["risk_medium_threshold"]),
+                        current.get("risk_high_threshold", DEFAULT_SETTINGS["risk_high_threshold"]),
+                        current.get("risk_critical_threshold", DEFAULT_SETTINGS["risk_critical_threshold"]),
+                    ),
                 )
 
     def _migrate(self, connection: sqlite3.Connection) -> None:
@@ -928,11 +1016,19 @@ class Database:
         with self.connect() as connection:
             return {r["key"]: r["value"] for r in connection.execute("SELECT * FROM settings")}
 
-    def update_settings(self, values: dict[str, float]) -> dict[str, float]:
-        """Validate and store threshold changes; rejects out-of-order thresholds."""
+    def update_settings(
+        self, values: dict[str, float], *, changed_by: int | None = None
+    ) -> dict[str, float]:
+        """Validate and store threshold changes; rejects out-of-order thresholds.
+
+        Any actual change to the three risk thresholds is additionally logged
+        to threshold_history, so a prediction recorded under an earlier
+        configuration stays associated with the threshold that was active
+        when it was produced, rather than whatever the thresholds happen to
+        be at evaluation time."""
         current = self.get_settings()
         merged = {**current, **{k: float(v) for k, v in values.items() if k in current}}
-        
+
         unknown = set(values) - set(current)
         if unknown:
             raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
@@ -946,10 +1042,245 @@ class Database:
         if merged["session_gap_tolerance_seconds"] <= 0:
             raise ValueError("Gap tolerance must be positive")
 
+        threshold_keys = ("risk_medium_threshold", "risk_high_threshold", "risk_critical_threshold")
+        thresholds_changed = any(
+            key in values and merged[key] != current[key] for key in threshold_keys
+        )
+
         with self.connect() as connection:
             for key, value in merged.items():
                 connection.execute("UPDATE settings SET value = ? WHERE key = ?", (value, key))
+            if thresholds_changed:
+                connection.execute(
+                    "INSERT INTO threshold_history"
+                    "(ts, risk_medium_threshold, risk_high_threshold, risk_critical_threshold, changed_by) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (time.time(), medium, high, critical, changed_by),
+                )
         return merged
+
+    def effective_thresholds_at(self, ts: float) -> dict[str, float]:
+        """The thresholds that were actually in effect at a given prediction
+        timestamp -- the most recent threshold_history row at or before ts,
+        falling back to the oldest known row for a ts before any history
+        existed (e.g. evaluating a sample recorded before this table existed
+        on an older database)."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM threshold_history WHERE ts <= ? ORDER BY ts DESC LIMIT 1", (ts,)
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT * FROM threshold_history ORDER BY ts ASC LIMIT 1"
+                ).fetchone()
+            if row is None:
+                return dict(DEFAULT_SETTINGS)
+            return {
+                "risk_medium_threshold": row["risk_medium_threshold"],
+                "risk_high_threshold": row["risk_high_threshold"],
+                "risk_critical_threshold": row["risk_critical_threshold"],
+            }
+
+    # ------------------------------------------------------------- gaps
+
+    def record_gap_start(self, session_id: int, source: str, started_at: float) -> int:
+        """Open a new sensor-interruption record for one required source.
+        Call only when that source was not already mid-gap (callers track
+        this; the table itself does not enforce at-most-one-open-gap)."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO session_gaps(session_id, source, started_at) VALUES (?, ?, ?)",
+                (session_id, source, started_at),
+            )
+            return int(cursor.lastrowid)
+
+    def record_gap_end(self, gap_id: int, ended_at: float) -> None:
+        """Close a previously opened gap once the source is seen again."""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE session_gaps SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+                (ended_at, gap_id),
+            )
+
+    def open_gap(self, session_id: int, source: str) -> dict[str, Any] | None:
+        """The still-open gap for this source in this session, if any."""
+        return self._fetch_one(
+            "SELECT * FROM session_gaps WHERE session_id = ? AND source = ? "
+            "AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+            (session_id, source),
+        )
+
+    # -------------------------------------------------------- orphan recovery
+
+    def recover_orphaned_sessions(self, reason: str = "orphaned_on_restart") -> list[int]:
+        """Close every session left open (ended_at IS NULL) from a PREVIOUS
+        process -- this process has no in-memory SessionRecorder registration
+        for any of them (that state does not survive a restart), so an open
+        row at startup means the server stopped (crash, redeploy, manual
+        kill) while a session was recording, not that the trip is still
+        live. Distinguishes this from an ordinary driver-initiated stop or
+        the stale-stream timeout, both of which set their own end_reason.
+        Returns the ids of every session this closed."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM sessions WHERE ended_at IS NULL"
+            ).fetchall()
+            ids = [int(r["id"]) for r in rows]
+            for session_id in ids:
+                connection.execute(
+                    "UPDATE sessions SET ended_at = ?, end_reason = ?, complete = 0 "
+                    "WHERE id = ? AND ended_at IS NULL",
+                    (time.time(), reason, session_id),
+                )
+            return ids
+
+    # ------------------------------------------------------- annotations
+
+    def add_annotation(
+        self,
+        session_id: int,
+        window_start_ts: float,
+        window_end_ts: float,
+        *,
+        ground_truth_hazard: str,
+        ground_truth_distracted: str,
+        annotator_id: int,
+        annotation_notes: str = "",
+    ) -> dict[str, Any]:
+        """Record a ground-truth label for one evaluation window. Always
+        inserts a new row -- never updates one in place -- so a corrected
+        label keeps its full history (see latest_annotations)."""
+        if ground_truth_hazard not in GROUND_TRUTH_HAZARD_STATES:
+            raise ValueError(f"Unknown ground_truth_hazard: {ground_truth_hazard}")
+        if ground_truth_distracted not in GROUND_TRUTH_ATTENTION_STATES:
+            raise ValueError(f"Unknown ground_truth_distracted: {ground_truth_distracted}")
+        if window_end_ts <= window_start_ts:
+            raise ValueError("window_end_ts must be after window_start_ts")
+        with self.connect() as connection:
+            prior = connection.execute(
+                "SELECT MAX(revision) AS revision FROM evaluation_annotations "
+                "WHERE session_id = ? AND window_start_ts = ? AND window_end_ts = ?",
+                (session_id, window_start_ts, window_end_ts),
+            ).fetchone()
+            revision = (prior["revision"] or 0) + 1
+            cursor = connection.execute(
+                "INSERT INTO evaluation_annotations(session_id, window_start_ts, window_end_ts, "
+                "ground_truth_hazard, ground_truth_distracted, annotation_notes, annotator_id, "
+                "annotated_at, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id, window_start_ts, window_end_ts, ground_truth_hazard,
+                    ground_truth_distracted, annotation_notes, annotator_id, time.time(), revision,
+                ),
+            )
+            return self._row(connection, "evaluation_annotations", int(cursor.lastrowid))
+
+    def latest_annotations(self, session_id: int) -> list[dict[str, Any]]:
+        """One row per (window_start_ts, window_end_ts) slot: only the
+        highest-revision row, i.e. the current label -- older revisions
+        remain in the table as history but are not returned here."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT a.* FROM evaluation_annotations a "
+                "JOIN (SELECT window_start_ts, window_end_ts, MAX(revision) AS max_revision "
+                "      FROM evaluation_annotations WHERE session_id = ? "
+                "      GROUP BY window_start_ts, window_end_ts) latest "
+                "ON a.window_start_ts = latest.window_start_ts "
+                "AND a.window_end_ts = latest.window_end_ts "
+                "AND a.revision = latest.max_revision "
+                "WHERE a.session_id = ? ORDER BY a.window_start_ts",
+                (session_id, session_id),
+            )
+            return [dict(r) for r in rows]
+
+    def annotation_history(
+        self, session_id: int, window_start_ts: float, window_end_ts: float
+    ) -> list[dict[str, Any]]:
+        """Every revision ever recorded for one specific window, oldest first."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM evaluation_annotations WHERE session_id = ? "
+                "AND window_start_ts = ? AND window_end_ts = ? ORDER BY revision",
+                (session_id, window_start_ts, window_end_ts),
+            )
+            return [dict(r) for r in rows]
+
+    # ----------------------------------------------------- alert verification
+
+    def verify_alert(
+        self, alert_id: int, verification_result: str, *, verified_by: int, notes: str = ""
+    ) -> dict[str, Any]:
+        """Record (or update) an evaluator's judgement of one alert event --
+        separate from the alert's own operational status/lifecycle."""
+        if verification_result not in ALERT_VERIFICATION_RESULTS:
+            raise ValueError(f"Unknown verification_result: {verification_result}")
+        with self.connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM alerts WHERE id = ?", (alert_id,)
+            ).fetchone() is None:
+                raise ValueError(f"No such alert: {alert_id}")
+            connection.execute(
+                "INSERT INTO alert_verifications(alert_id, verification_result, verified_by, "
+                "verified_at, notes) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(alert_id) DO UPDATE SET verification_result = excluded.verification_result, "
+                "verified_by = excluded.verified_by, verified_at = excluded.verified_at, "
+                "notes = excluded.notes",
+                (alert_id, verification_result, verified_by, time.time(), notes),
+            )
+            return self._fetch_one(
+                "SELECT * FROM alert_verifications WHERE alert_id = ?", (alert_id,)
+            )
+
+    def get_alert_verification(self, alert_id: int) -> dict[str, Any] | None:
+        return self._fetch_one(
+            "SELECT * FROM alert_verifications WHERE alert_id = ?", (alert_id,)
+        )
+
+    # ------------------------------------------------------- collision tests
+
+    def record_collision_test(
+        self,
+        scenario_type: str,
+        *,
+        expected_collision_detection: bool,
+        actual_collision_detection: bool,
+        detection_latency_ms: float | None = None,
+        notes: str = "",
+        recorded_by: int | None = None,
+        test_timestamp: float | None = None,
+    ) -> dict[str, Any]:
+        """Store one controlled, staged collision-detection test. test_result
+        (pass/fail) is derived, never stored redundantly: a row is a pass iff
+        expected_collision_detection == actual_collision_detection."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO collision_tests(test_timestamp, scenario_type, "
+                "expected_collision_detection, actual_collision_detection, "
+                "detection_latency_ms, notes, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    test_timestamp if test_timestamp is not None else time.time(),
+                    scenario_type, int(expected_collision_detection),
+                    int(actual_collision_detection), detection_latency_ms, notes, recorded_by,
+                ),
+            )
+            return self._decode_collision_test(
+                self._row(connection, "collision_tests", int(cursor.lastrowid))
+            )
+
+    def list_collision_tests(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM collision_tests ORDER BY test_timestamp")
+            return [self._decode_collision_test(dict(r)) for r in rows]
+
+    @staticmethod
+    def _decode_collision_test(row: dict[str, Any]) -> dict[str, Any]:
+        row["expected_collision_detection"] = bool(row["expected_collision_detection"])
+        row["actual_collision_detection"] = bool(row["actual_collision_detection"])
+        row["test_result"] = (
+            "pass"
+            if row["expected_collision_detection"] == row["actual_collision_detection"]
+            else "fail"
+        )
+        return row
 
     # ----------------------------------------------------------- access log
 

@@ -116,3 +116,58 @@ def test_fresh_database_already_has_detail_json_with_no_migration_needed(tmp_pat
     with database.connect() as connection:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(alerts)")}
         assert "detail_json" in columns
+
+
+def test_opening_a_pre_evaluation_schema_database_adds_new_tables_without_data_loss(tmp_path):
+    """Chapter 6 evaluation support (threshold_history, evaluation_annotations,
+    alert_verifications, collision_tests) must appear on an existing database
+    that predates them, with every existing session/alert/user row intact."""
+    db_path = tmp_path / "pre_evaluation.sqlite3"
+    _create_pre_migration_schema(db_path)
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stream_id TEXT NOT NULL UNIQUE,
+            user_id INTEGER NOT NULL,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            end_reason TEXT,
+            complete INTEGER NOT NULL DEFAULT 1,
+            summary TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO sessions(id, stream_id, user_id, started_at) VALUES (1, 's1', 1, ?)",
+        (time.time(),),
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(db_path)
+
+    with database.connect() as connection:
+        tables = {
+            row["name"] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        for table in (
+            "threshold_history", "evaluation_annotations",
+            "alert_verifications", "collision_tests",
+        ):
+            assert table in tables
+
+        # Pre-existing data from before this migration survives untouched.
+        assert connection.execute("SELECT count(*) AS n FROM sessions").fetchone()["n"] == 1
+        assert connection.execute("SELECT count(*) AS n FROM alerts").fetchone()["n"] == 2
+        assert connection.execute("SELECT count(*) AS n FROM users").fetchone()["n"] == 1
+
+        # threshold_history is seeded with one row so an immediate
+        # effective_thresholds_at() lookup never comes back empty.
+        assert connection.execute("SELECT count(*) AS n FROM threshold_history").fetchone()["n"] == 1
+
+    thresholds = database.effective_thresholds_at(time.time())
+    assert thresholds["risk_high_threshold"] == 0.70

@@ -658,7 +658,7 @@ def create_router(
     @router.put("/settings")
     def put_settings(payload: SettingsRequest, principal: Principal = admin) -> dict[str, float]:
         try:
-            return database.update_settings(payload.values)
+            return database.update_settings(payload.values, changed_by=principal.user_id)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

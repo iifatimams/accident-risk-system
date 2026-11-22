@@ -1410,6 +1410,11 @@ public class BackgroundCaptureService:
       var payload = snapshot.toDictionary()
       payload["risk_active"] = riskActive
       payload["risk_computation_latency_ms"] = riskComputeLatencyMs
+      // Real, measured time from frame arrival to Vision completing (see
+      // publishProcessingLatency) -- already computed, just never
+      // previously sent to the backend.
+      payload["front_processing_latency_ms"] = self.frontProcessingLatencyMs
+      payload["back_processing_latency_ms"] = self.backProcessingLatencyMs
       // Dashboard-only explainability, same status as camera_status/debug_*
       // elsewhere in this payload -- NOT part of the validated SensorFrame
       // schema, and the index itself remains experimental/uncalibrated
@@ -1428,6 +1433,11 @@ public class BackgroundCaptureService:
           "hard_override_applied": breakdown.hardOverrideApplied,
           "collision_support_evidence": breakdown.collisionSupportEvidence,
           "off_road_gaze_sec": snapshot.offRoadGazeSec,
+          // The vehicle-only POLIDriving 5s-ahead probability itself -- NOT
+          // multimodal_risk.five_second_ahead_risk below, which is already a
+          // blended vehicle+attention+road forecast. nil (-> JSON null) when
+          // the model's input wasn't available this frame, never 0.
+          "five_second_ahead_vehicle_hazard_prob": breakdown.fiveSecondAheadVehicleHazardProb as Any,
         ]
         payload["multimodal_risk"] = [
           "current_risk": multimodalEstimate.currentRisk,

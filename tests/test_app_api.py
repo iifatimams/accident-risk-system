@@ -264,6 +264,67 @@ def test_edge_mode_without_reported_latency_stays_zero_not_fabricated(client, pe
     assert sample["inference_latency_ms"] == 0.0
 
 
+def test_edge_mode_persists_vehicle_only_score_distinct_from_fused_overall_risk_index(
+    client, people, monkeypatch
+):
+    """vehicle_risk_score must carry the device's own vehicle-only
+    POLIDriving probability (risk_breakdown.five_second_ahead_vehicle_hazard_prob),
+    never the blended multimodal forecast, and overall_risk_index must stay
+    the final fused 0-99.9 risk_score normalized to 0-1."""
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    headers = sign_in(client, "+971501110001")
+    me = client.get("/app/api/me", headers=headers).json()
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": started["stream_id"],
+        "risk_active": True, "risk_score": 42.0,
+        "risk_breakdown": {"five_second_ahead_vehicle_hazard_prob": 0.37},
+        "multimodal_risk": {"five_second_ahead_risk": 55.0},  # a DIFFERENT, blended number
+    })
+    session_id = people.active_session(me["id"])["id"]
+    sample = people.session_samples(session_id)[0]
+    assert sample["vehicle_risk_score"] == pytest.approx(0.37)
+    assert sample["overall_risk_index"] == pytest.approx(0.42)
+
+
+def test_edge_mode_without_vehicle_score_stores_null_not_zero(client, people, monkeypatch):
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    headers = sign_in(client, "+971501110001")
+    me = client.get("/app/api/me", headers=headers).json()
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+
+    client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": started["stream_id"],
+        "risk_active": True, "risk_score": 10.0,
+    })
+    session_id = people.active_session(me["id"])["id"]
+    sample = people.session_samples(session_id)[0]
+    assert sample["vehicle_risk_score"] is None
+
+
+def test_edge_mode_rejects_out_of_range_vehicle_score(client, people, monkeypatch):
+    monkeypatch.setattr(
+        "accident_risk.api.main.MapContextResolver.is_in_roundabout",
+        lambda self, latitude, longitude: False,
+    )
+    headers = sign_in(client, "+971501110001")
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+
+    response = client.post("/ingest", json={
+        "timestamp": time.time(), "source": "ios", "stream_id": started["stream_id"],
+        "risk_active": True, "risk_score": 10.0,
+        "risk_breakdown": {"five_second_ahead_vehicle_hazard_prob": 1.5},
+    })
+    assert response.status_code == 422
+
+
 def test_drivers_only_see_their_own_sessions(client, people):
     driver = sign_in(client, "+971501110001")
     admin = sign_in(client, "+971501110003")
