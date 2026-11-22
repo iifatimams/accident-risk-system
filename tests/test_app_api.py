@@ -732,6 +732,45 @@ def test_legacy_pending_alert_confirm_and_cancel_remain_unrestricted(client, app
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
 
 
+def test_alert_verification_is_admin_only_and_separate_from_status(client, app, people, monkeypatch):
+    """Evaluator verification (correct/false) must be a distinct judgement
+    from the driver-facing confirm/cancel status, and only an administrator
+    may record it."""
+    headers = sign_in(client, "+971501110001")
+    started = client.post("/app/api/driver/session/start", headers=headers, json={}).json()
+    app.state.recorder.register(started["stream_id"], started["id"])
+    alert = app.state.db.create_alert(
+        user_id=app.state.db.get_user_by_phone("+971501110001")["id"],
+        kind="high_risk", session_id=started["id"], risk_index=0.9,
+    )
+
+    # A driver cannot verify an alert.
+    denied = client.post(
+        f"/app/api/alerts/{alert['id']}/verify", headers=headers, json={"result": "correct"}
+    )
+    assert denied.status_code == 403
+
+    admin_headers = sign_in(client, "+971501110003")
+    response = client.post(
+        f"/app/api/alerts/{alert['id']}/verify", headers=admin_headers,
+        json={"result": "correct", "notes": "matched dashcam"},
+    )
+    assert response.status_code == 200
+    assert response.json()["verification_result"] == "correct"
+
+    listed = client.get("/app/api/alerts", headers=admin_headers).json()
+    found = next(a for a in listed if a["id"] == alert["id"])
+    assert found["verification_result"] == "correct"
+    # The driver-facing status is untouched by verification.
+    assert found["status"] == "pending"
+
+    # Invalid result is rejected.
+    bad = client.post(
+        f"/app/api/alerts/{alert['id']}/verify", headers=admin_headers, json={"result": "maybe"}
+    )
+    assert bad.status_code == 422
+
+
 def test_unconfirmed_collision_incident_times_out(client, app, people, monkeypatch):
     clock = [3_000_000.0]
     monkeypatch.setattr("time.time", lambda: clock[0])

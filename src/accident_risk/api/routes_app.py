@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from accident_risk.api.auth import AuthError, AuthService, Principal, bearer_from_header
-from accident_risk.api.db import Database, role_allows
+from accident_risk.api.db import ALERT_VERIFICATION_RESULTS, Database, role_allows
 from accident_risk.api.notifications import MockNotificationSender, build_message
 from accident_risk.api.recorder import SessionRecorder
 from accident_risk.inference.engine import InferenceEngine
@@ -118,6 +118,11 @@ class DevicePatch(BaseModel):
     status: str | None = None
     assigned_to: int | None = None
     clear_assignment: bool = False
+
+
+class AlertVerificationRequest(BaseModel):
+    result: str
+    notes: str = ""
 
 
 class SettingsRequest(BaseModel):
@@ -471,7 +476,33 @@ def create_router(
         timeout_unconfirmed_incidents()
         scope = None if role_allows(principal.role, "administrator") else principal.user_id
         database.log_access(principal.user_id, principal.role, "alerts")
-        return database.list_alerts(user_id=scope, kind=kind, limit=limit)
+        results = database.list_alerts(user_id=scope, kind=kind, limit=limit)
+        # Evaluator verification (correct/false/unreviewed) is a separate,
+        # research-only judgement -- distinct from the alert's own
+        # operational status/lifecycle above -- so it's attached here
+        # rather than folded into list_alerts itself.
+        for alert in results:
+            verification = database.get_alert_verification(alert["id"])
+            alert["verification_result"] = (
+                verification["verification_result"] if verification else "unreviewed"
+            )
+        return results
+
+    @router.post("/alerts/{alert_id}/verify")
+    def verify_alert_route(
+        alert_id: int, payload: AlertVerificationRequest, principal: Principal = admin,
+    ) -> dict[str, Any]:
+        """An administrator's research judgement of one alert event (did it
+        actually correspond to a real hazard/collision), kept separate from
+        the driver-facing confirm/cancel/dismiss/resolve lifecycle above."""
+        if payload.result not in ALERT_VERIFICATION_RESULTS:
+            raise HTTPException(422, f"Unknown verification result: {payload.result}")
+        try:
+            return database.verify_alert(
+                alert_id, payload.result, verified_by=principal.user_id, notes=payload.notes
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @router.post("/alerts/{alert_id}/{action}")
     def act_on_alert(alert_id: int, action: str, principal: Principal = any_user) -> dict[str, Any]:

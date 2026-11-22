@@ -201,6 +201,9 @@ td.num { font-variant-numeric: tabular-nums; }
 .pill.active { background: rgba(32, 165, 116, .13); color: #15754f; }
 .pill.spare { background: #eef3f2; color: var(--muted); }
 .pill.out_of_service { background: rgba(201, 63, 63, .14); color: #8f2b2b; }
+.pill.correct { background: rgba(32, 165, 116, .13); color: #15754f; }
+.pill.false { background: rgba(201, 63, 63, .14); color: #8f2b2b; }
+.pill.unreviewed { background: #eef3f2; color: var(--muted); }
 
 /* ────────────────────────────────── map ────────────────────────────────── */
 .map-frame { position: relative; }

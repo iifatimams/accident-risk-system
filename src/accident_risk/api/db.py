@@ -1226,9 +1226,14 @@ class Database:
                 "notes = excluded.notes",
                 (alert_id, verification_result, verified_by, time.time(), notes),
             )
-            return self._fetch_one(
+            # Read back on the SAME connection/transaction -- a second
+            # connection via self._fetch_one would not see this write until
+            # the outer `with` block above commits on exit, and would
+            # wrongly return None.
+            row = connection.execute(
                 "SELECT * FROM alert_verifications WHERE alert_id = ?", (alert_id,)
-            )
+            ).fetchone()
+            return dict(row)
 
     def get_alert_verification(self, alert_id: int) -> dict[str, Any] | None:
         return self._fetch_one(

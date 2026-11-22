@@ -739,7 +739,8 @@ async function alertsView() {
         <span class="muted">${alerts.length} recorded</span></div>
       ${alerts.length ? `<div class="table-wrap"><table>
         <thead><tr><th>Raised</th>${isAdmin ? "<th>Driver</th>" : ""}<th>Type</th>
-          <th>Risk</th><th>Status</th><th></th></tr></thead>
+          <th>Risk</th><th>Status</th><th></th>
+          ${isAdmin ? "<th>Verification</th>" : ""}</tr></thead>
         <tbody>${alerts.map((a) => `
           <tr><td>${esc(clock(a.created_at))}</td>
           ${isAdmin ? `<td>${esc(a.driver_name)}</td>` : ""}
@@ -748,6 +749,11 @@ async function alertsView() {
           <td><span class="pill ${esc(a.status)}">${esc(a.status)}</span></td>
           <td>${a.status === "pending"
     ? `<button class="btn small" data-ack="${a.id}">Acknowledge</button>` : ""}</td>
+          ${isAdmin ? `<td>
+            <span class="pill ${esc(a.verification_result)}">${esc(a.verification_result)}</span>
+            <button class="btn small" data-verify="${a.id}" data-result="correct">Correct</button>
+            <button class="btn small" data-verify="${a.id}" data-result="false">False</button>
+          </td>` : ""}
           </tr>`).join("")}</tbody></table></div>`
       : `<div class="empty"><strong>No alerts</strong>
          Nothing has crossed the high-risk threshold.</div>`}
@@ -757,6 +763,18 @@ async function alertsView() {
       try {
         await api(`/alerts/${button.dataset.ack}/confirm`, { method: "POST" });
         toast("Alert acknowledged");
+        alertsView();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+  $("#main").querySelectorAll("[data-verify]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await api(`/alerts/${button.dataset.verify}/verify`, {
+          method: "POST",
+          body: { result: button.dataset.result },
+        });
+        toast("Alert verification recorded");
         alertsView();
       } catch (error) { toast(error.message, true); }
     });
