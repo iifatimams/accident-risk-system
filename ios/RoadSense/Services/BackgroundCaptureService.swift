@@ -1092,7 +1092,8 @@ public class BackgroundCaptureService:
             // to preserve this event. Everything downstream (the UI prompt,
             // the upload, retries) reads from this same stored record.
             self.incidentStore.record(
-              suspicion, streamId: self.streamId, accelX: totalX, accelY: totalY, accelZ: totalZ
+              suspicion, streamId: self.streamId, accelX: totalX, accelY: totalY, accelZ: totalZ,
+              gpsLatitude: self.currentFrame.gpsLatitude, gpsLongitude: self.currentFrame.gpsLongitude
             )
             // VZCrash-model discrimination evidence (master directive
             // section 7: "improve discrimination between suspected
@@ -1121,7 +1122,8 @@ public class BackgroundCaptureService:
               self.suspectedCollision = suspicion
             }
             self.reportCollisionImmediately(
-              suspicion, accelX: totalX, accelY: totalY, accelZ: totalZ
+              suspicion, accelX: totalX, accelY: totalY, accelZ: totalZ,
+              gpsLatitude: self.currentFrame.gpsLatitude, gpsLongitude: self.currentFrame.gpsLongitude
             )
           }
         }
@@ -1508,18 +1510,24 @@ public class BackgroundCaptureService:
   // retry, however late, resolve to the SAME server-side incident rather
   // than creating a duplicate.
   private func reportCollisionImmediately(
-    _ suspicion: CollisionSuspicion, accelX: Double, accelY: Double, accelZ: Double
+    _ suspicion: CollisionSuspicion, accelX: Double, accelY: Double, accelZ: Double,
+    gpsLatitude: Double? = nil, gpsLongitude: Double? = nil
   ) {
-    uploadIncident(id: suspicion.id, streamId: self.streamId, timestamp: suspicion.onsetEstimate, accelX: accelX, accelY: accelY, accelZ: accelZ)
+    uploadIncident(
+      id: suspicion.id, streamId: self.streamId, timestamp: suspicion.onsetEstimate,
+      accelX: accelX, accelY: accelY, accelZ: accelZ,
+      gpsLatitude: gpsLatitude, gpsLongitude: gpsLongitude
+    )
   }
 
   private func uploadIncident(
-    id: String, streamId: String, timestamp: Double, accelX: Double, accelY: Double, accelZ: Double
+    id: String, streamId: String, timestamp: Double, accelX: Double, accelY: Double, accelZ: Double,
+    gpsLatitude: Double? = nil, gpsLongitude: Double? = nil
   ) {
     guard let url = URL(string: "\(self.serverUrl)/api/v1/ingest") else {
       return
     }
-    let payload: [String: Any] = [
+    var payload: [String: Any] = [
       "timestamp": timestamp,
       "stream_id": streamId,
       "source": "ios",
@@ -1528,6 +1536,14 @@ public class BackgroundCaptureService:
       "accel_z": accelZ,
       "client_incident_id": id,
     ]
+    // Omitted (not sent as null) when no fix was available at detection
+    // time -- the server's own gps_latitude/gps_longitude are already
+    // Optional and default to None, so there's no reason to send an
+    // explicit null and every reason not to fabricate a 0.0 location.
+    if let lat = gpsLatitude, let lon = gpsLongitude {
+      payload["gps_latitude"] = lat
+      payload["gps_longitude"] = lon
+    }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1554,7 +1570,8 @@ public class BackgroundCaptureService:
     for incident in incidentStore.pendingUpload() {
       uploadIncident(
         id: incident.id, streamId: incident.streamId, timestamp: incident.onsetEstimate,
-        accelX: incident.accelX, accelY: incident.accelY, accelZ: incident.accelZ
+        accelX: incident.accelX, accelY: incident.accelY, accelZ: incident.accelZ,
+        gpsLatitude: incident.gpsLatitude, gpsLongitude: incident.gpsLongitude
       )
     }
     for incident in incidentStore.pendingDecisionSync() {

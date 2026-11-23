@@ -48,6 +48,13 @@ public struct StoredIncident: Codable, Identifiable, Equatable {
   /// apply a stored property's default for an absent key.
   public var collisionEvidenceClass: String?
   public var collisionEvidenceConfidence: Double?
+  /// GPS fix at the moment of detection, if one was available -- without
+  /// this, every collision alert from the real app (as opposed to a
+  /// synthetic /ingest test call) had no location at all, since the
+  /// collision-report upload never carried GPS. Optional for the same
+  /// backward-compatibility reason as the two fields above.
+  public var gpsLatitude: Double?
+  public var gpsLongitude: Double?
 }
 
 /// The phone must never depend on the server to preserve an accident event:
@@ -69,7 +76,8 @@ public final class CollisionIncidentStore {
 
   @discardableResult
   public func record(
-    _ suspicion: CollisionSuspicion, streamId: String, accelX: Double, accelY: Double, accelZ: Double
+    _ suspicion: CollisionSuspicion, streamId: String, accelX: Double, accelY: Double, accelZ: Double,
+    gpsLatitude: Double? = nil, gpsLongitude: Double? = nil
   ) -> StoredIncident {
     let incident = StoredIncident(
       id: suspicion.id, streamId: streamId, accelMagnitudeMs2: suspicion.accelMagnitudeMs2,
@@ -78,7 +86,8 @@ public final class CollisionIncidentStore {
       status: .suspected, detectedAt: suspicion.onsetEstimate,
       confirmedAt: nil, dismissedAt: nil, serverAlertId: nil,
       uploaded: false, syncedDecision: false, syncRejected: false,
-      collisionEvidenceClass: nil, collisionEvidenceConfidence: nil
+      collisionEvidenceClass: nil, collisionEvidenceConfidence: nil,
+      gpsLatitude: gpsLatitude, gpsLongitude: gpsLongitude
     )
     queue.sync {
       var all = loadAllLocked()
