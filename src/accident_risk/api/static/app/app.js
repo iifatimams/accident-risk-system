@@ -5,6 +5,10 @@
 
 const API = "/app/api";
 const STORE = "roadsense.token";
+// Hides the experimental/unvalidated diagnostic lines (attention-state,
+// pedestrian/forward-hazard states, risk-basis note, raw pitch/yaw/roll/
+// EAR/gaze) from the camera panel -- flip back to true for real debugging.
+const SHOW_EXPERIMENTAL_DIAGNOSTICS = false;
 const native = typeof RoadSenseNative !== "undefined" ? RoadSenseNative : null;
 
 const state = {
@@ -262,13 +266,16 @@ async function driveView() {
              -- the "cv" grid-area this card uses is not one of
              .drive-grid's declared areas (risk/session/readings/kit in
              app.css), so a second element placed at grid-area:cv would
-             silently overlap this one instead of stacking below it. -->
+             silently overlap this one instead of stacking below it. Hidden
+             behind SHOW_EXPERIMENTAL_DIAGNOSTICS, same as the other
+             experimental readouts -- see that flag's own comment. -->
+        ${SHOW_EXPERIMENTAL_DIAGNOSTICS ? `
         <div style="margin-top:16px">
           <h3 style="font-size:15px; margin-bottom:10px;">Risk breakdown (experimental)</h3>
           <div id="risk-breakdown">
               Awaiting an active driving session...
           </div>
-        </div>
+        </div>` : ""}
       </div>
 
       <div class="card area-readings">
@@ -370,6 +377,8 @@ async function refreshDriver() {
   const yaw = data.cv_debug_yaw ?? null;
   const roll = data.cv_debug_roll ?? null;
   const ear = data.cv_debug_ear ?? null;
+  const gazeAvailable = data.cv_debug_gaze_available ?? null;
+  const gazeVertical = data.cv_debug_gaze_vertical ?? null;
   const riskBreakdown = data.risk_breakdown ?? null;
   const multimodalRisk = data.multimodal_risk ?? null;
 
@@ -381,12 +390,13 @@ async function refreshDriver() {
   $("#cv-debug").innerHTML = `
       <strong>Camera status:</strong> ${cameraStatus === null ? "Unavailable" : esc(String(cameraStatus))}<br>
       <strong>Eyes on Road:</strong> ${eyesOn === null ? "Unavailable" : eyesOn ? "YES" : "NO (Possible distraction)"}<br>
-      <strong>Attention state (experimental):</strong> ${stateLabel(attentionState)}<br>
+      ${SHOW_EXPERIMENTAL_DIAGNOSTICS ? `<strong>Attention state (experimental):</strong> ${stateLabel(attentionState)}<br>` : ""}
       <strong>Eyes Closed:</strong> ${eyesClosed === null ? "Unavailable" : `${num(eyesClosed, 1)}s`}<br>
       <strong>Traffic estimate:</strong> ${traffic === null ? "Unavailable" : esc(String(traffic).toUpperCase())}<br>
       <strong>Pedestrians:</strong> ${pedestriansDetected === null ? "Unavailable" : pedestriansDetected ? `YES (${pedestrianCount ?? "?"})` : "None detected"}<br>
-      <strong>Pedestrian hazard (experimental):</strong> ${stateLabel(pedestrianHazardState)}<br>
+      ${SHOW_EXPERIMENTAL_DIAGNOSTICS ? `<strong>Pedestrian hazard (experimental):</strong> ${stateLabel(pedestrianHazardState)}<br>` : ""}
       <strong>Lead vehicle closing:</strong> ${closingFast === null ? "Unavailable" : closingFast ? "Possible" : "Not detected"}<br>
+      ${SHOW_EXPERIMENTAL_DIAGNOSTICS ? `
       <strong>Forward hazard (experimental):</strong> ${stateLabel(forwardHazardState)}<br>
       <strong>Risk score basis:</strong> the risk index above IS a 5-second-ahead forecast (vehicle model + live attention/road evidence), not a snapshot of right now.
       ${multimodalRisk ? ` Dominant factor: ${stateLabel(multimodalRisk.dominant_factor)} (evidence quality ${num(multimodalRisk.evidence_quality, 2)}).` : ""}<br>
@@ -396,8 +406,9 @@ async function refreshDriver() {
         Pitch: ${pitch === null ? "n/a" : num(pitch, 3)} (distracted if &lt; -0.4)<br>
         Yaw: ${yaw === null ? "n/a" : num(yaw, 3)} (distracted if |yaw| &gt; 0.45)<br>
         Roll: ${roll === null ? "n/a" : num(roll, 3)}<br>
-        Eye aspect ratio: ${ear === null ? "n/a" : num(ear, 3)} (closed if &lt; 0.18)
-      </span>
+        Eye aspect ratio: ${ear === null ? "n/a" : num(ear, 3)} (closed if &lt; 0.18)<br>
+        Gaze (pupil position, independent of head pitch): ${gazeAvailable ? `${num(gazeVertical, 3)} vertical (distracted if &lt; -0.18)` : "unavailable this frame"}
+      </span>` : ""}
   `;
 
   const breakdownBox = $("#risk-breakdown");
@@ -783,6 +794,7 @@ async function alertsView() {
 
 async function familyView() {
   const links = await api("/driver/family-links");
+  const notifications = await api("/driver/family-notifications");
   const myId = state.user.id;
   const pending = links.filter((l) => l.status === "requested" && l.recipient_id === myId);
   const sent = links.filter((l) => l.status === "requested" && l.requester_id === myId);
@@ -796,6 +808,24 @@ async function familyView() {
   };
 
   $("#main").innerHTML = `
+    ${notifications.length ? `<div class="card">
+      <div class="card-head"><h2>Accident notifications</h2></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Driver</th><th>Status</th><th>When</th><th>Location</th><th></th></tr></thead>
+        <tbody>${notifications.map((n) => `
+          <tr${n.acknowledged_at ? "" : ' style="font-weight:600"'}>
+            <td>${esc(n.driver_name)}</td>
+            <td>${esc(String(n.alert_status).replace(/_/g, " "))}</td>
+            <td>${esc(clock(n.sent_at))}</td>
+            <td>${n.latitude != null && n.longitude != null
+              ? `<a href="https://maps.google.com/?q=${n.latitude},${n.longitude}" target="_blank" rel="noopener">map</a>`
+              : "Not shared"}</td>
+            <td>${n.acknowledged_at
+              ? `Acknowledged ${esc(clock(n.acknowledged_at))}`
+              : `<button class="btn small" data-ack-notification="${n.id}">Acknowledge</button>`}</td>
+          </tr>`).join("")}
+        </tbody></table></div>
+    </div>` : ""}
     <div class="card">
       <div class="card-head"><h2>Family</h2></div>
       <form id="add-family" class="form-row">
@@ -895,6 +925,17 @@ async function familyView() {
         });
         toast("Updated");
       } catch (error) { toast(error.message, true); checkbox.checked = !checkbox.checked; }
+    });
+  });
+
+  $("#main").querySelectorAll("[data-ack-notification]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await api(`/driver/family-notifications/${button.dataset.ackNotification}/acknowledge`, {
+          method: "POST",
+        });
+        familyView();
+      } catch (error) { toast(error.message, true); }
     });
   });
 }

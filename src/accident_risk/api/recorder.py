@@ -413,6 +413,13 @@ class SessionRecorder:
             "debug_yaw": camera.get("debug_yaw"),
             "debug_roll": camera.get("debug_roll"),
             "debug_ear": camera.get("debug_ear"),
+            # Eye-gaze-by-pupil-position, independent of head pitch -- lets
+            # a reviewed session distinguish "pitch-only missed a level-head
+            # phone glance" from "gaze reading was unavailable this frame"
+            # (debug_gaze_available False) from "gaze agreed with pitch".
+            "debug_gaze_available": camera.get("debug_gaze_available"),
+            "debug_gaze_vertical": camera.get("debug_gaze_vertical"),
+            "debug_gaze_horizontal": camera.get("debug_gaze_horizontal"),
             # Without this, a pitch/yaw/roll of 0 is ambiguous: "looking
             # dead ahead" and "no face found this frame" are otherwise
             # indistinguishable when reviewing a session's pose timeline

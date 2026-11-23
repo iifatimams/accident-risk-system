@@ -329,6 +329,9 @@ def create_app(
                     "debug_yaw": body.get("debug_yaw", 0.0),
                     "debug_roll": body.get("debug_roll", 0.0),
                     "debug_ear": body.get("debug_ear", 0.0),
+                    "debug_gaze_available": body.get("debug_gaze_available", False),
+                    "debug_gaze_vertical": body.get("debug_gaze_vertical", 0.0),
+                    "debug_gaze_horizontal": body.get("debug_gaze_horizontal", 0.0),
                     # See ios/RoadSense/Services/ContextManager.swift. Always
                     # the CLEAR/1.0 "unknown" default until a real OpenWeather
                     # API key is configured on the device -- weather_is_live
@@ -554,6 +557,9 @@ def create_app(
             result["cv_debug_yaw"] = ui_data.get("debug_yaw", 0.0)
             result["cv_debug_roll"] = ui_data.get("debug_roll", 0.0)
             result["cv_debug_ear"] = ui_data.get("debug_ear", 0.0)
+            result["cv_debug_gaze_available"] = ui_data.get("debug_gaze_available", False)
+            result["cv_debug_gaze_vertical"] = ui_data.get("debug_gaze_vertical", 0.0)
+            result["cv_debug_gaze_horizontal"] = ui_data.get("debug_gaze_horizontal", 0.0)
             result["risk_breakdown"] = ui_data.get("risk_breakdown")
             # multimodal_risk.five_second_ahead_risk is no longer a separate
             # advisory number -- it IS risk_score/risk_index now (see

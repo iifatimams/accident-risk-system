@@ -439,6 +439,25 @@ def create_router(
             raise HTTPException(404, "Invalid acknowledge token")
         return {"status": "acknowledged"}
 
+    @router.get("/driver/family-notifications")
+    def family_notifications(principal: Principal = any_user) -> list[dict[str, Any]]:
+        """The signed-in user's OWN inbox of accident notifications sent to
+        them about a linked family member's incident -- notify_family_of_
+        incident only ever wrote these rows; nothing previously read them
+        back for the recipient's own screen."""
+        return database.list_family_notifications_for_recipient(principal.user_id)
+
+    @router.post("/driver/family-notifications/{notification_id}/acknowledge")
+    def acknowledge_own_family_notification(
+        notification_id: int, principal: Principal = any_user
+    ) -> dict[str, Any]:
+        """Signed-in counterpart to /family/acknowledge (which is
+        token-only, for a contact with no account)."""
+        acknowledged = database.acknowledge_family_notification_by_id(notification_id, principal.user_id)
+        if acknowledged is None:
+            raise HTTPException(404, "Notification not found or not yours")
+        return acknowledged
+
     @router.post("/driver/session/start")
     def start_session(payload: StartSessionRequest, principal: Principal = any_user) -> dict[str, Any]:
         existing = database.active_session(principal.user_id)

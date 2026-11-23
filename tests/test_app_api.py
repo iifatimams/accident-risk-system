@@ -191,6 +191,7 @@ def test_full_sample_is_recorded_unconditionally_with_weather_and_pose(client, p
         "risk_active": True, "risk_score": 12.5,
         "vehicle_speed": 15.0, "heart_rate": 80,
         "debug_pitch": -0.3, "debug_yaw": 0.1, "debug_roll": 0.05, "debug_ear": 0.22,
+        "debug_gaze_available": True, "debug_gaze_vertical": -0.22, "debug_gaze_horizontal": 0.05,
         "debug_face_detected": True, "camera_status": "active",
         "eyes_on_road": False, "eyes_closed_sec": 1.2,
         "weather_multiplier": 1.25, "weather_condition_code": 8.0, "weather_is_live": True,
@@ -203,6 +204,9 @@ def test_full_sample_is_recorded_unconditionally_with_weather_and_pose(client, p
     assert sample["debug_yaw"] == 0.1
     assert sample["debug_roll"] == 0.05
     assert sample["debug_ear"] == 0.22
+    assert sample["debug_gaze_available"] is True
+    assert sample["debug_gaze_vertical"] == -0.22
+    assert sample["debug_gaze_horizontal"] == 0.05
     assert sample["debug_face_detected"] is True
     assert sample["camera_status"] == "active"
     assert sample["eyes_on_road"] is False
@@ -976,15 +980,39 @@ def test_confirmed_collision_notifies_family_respecting_location_consent(
     assert len(app.state.notification_sender.sent) == 2
 
     # Who was told, and whether they've acknowledged -- read directly off the
-    # database, since no screen in the app surfaces this list (the HTTP route
-    # that used to expose it was unused and removed).
+    # database for cross-checking, but also exactly what each recipient's own
+    # screen now shows them (GET /driver/family-notifications).
     notifications = people.list_family_notifications(incident["id"])
     assert len(notifications) == 2
     assert all(n["acknowledged_at"] is None for n in notifications)
-    ack = client.post("/app/api/family/acknowledge", json={"token": notifications[0]["acknowledge_token"]})
+
+    near_inbox = client.get("/app/api/driver/family-notifications", headers=near_headers).json()
+    assert len(near_inbox) == 1
+    assert near_inbox[0]["driver_name"] == "Driver One"
+    assert near_inbox[0]["alert_status"] == "confirmed"
+    assert near_inbox[0]["latitude"] == 25.3
+    assert near_inbox[0]["acknowledged_at"] is None
+
+    far_inbox = client.get("/app/api/driver/family-notifications", headers=far_headers).json()
+    assert len(far_inbox) == 1
+    assert far_inbox[0]["latitude"] is None  # location withheld from this recipient
+
+    ack_route = client.post(
+        f"/app/api/driver/family-notifications/{near_inbox[0]['id']}/acknowledge", headers=near_headers
+    )
+    assert ack_route.status_code == 200 and ack_route.json()["acknowledged_at"] is not None
+    # The other recipient cannot acknowledge a notification that isn't theirs.
+    not_theirs = client.post(
+        f"/app/api/driver/family-notifications/{near_inbox[0]['id']}/acknowledge", headers=far_headers
+    )
+    assert not_theirs.status_code == 404
+
+    far_id = people.get_user_by_phone("+971500000444")["id"]
+    far_notification = next(n for n in notifications if n["recipient_user_id"] == far_id)
+    ack = client.post("/app/api/family/acknowledge", json={"token": far_notification["acknowledge_token"]})
     assert ack.status_code == 200 and ack.json()["status"] == "acknowledged"
     refreshed = people.list_family_notifications(incident["id"])
-    assert sum(1 for n in refreshed if n["acknowledged_at"] is not None) == 1
+    assert sum(1 for n in refreshed if n["acknowledged_at"] is not None) == 2
 
 
 def test_administrator_confirmed_incident_notifies_family_with_different_wording(

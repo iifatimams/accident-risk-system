@@ -1032,12 +1032,72 @@ class Database:
             )
             return self._row(connection, "family_notifications", row["id"])
 
+    def acknowledge_family_notification_by_id(
+        self, notification_id: int, recipient_user_id: int
+    ) -> dict[str, Any] | None:
+        """Signed-in counterpart to acknowledge_family_notification (which
+        is token-only, for a contact with no account) -- scoped to the
+        caller's OWN notifications, never lets one recipient acknowledge
+        another's."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM family_notifications WHERE id = ? AND recipient_user_id = ?",
+                (notification_id, recipient_user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE family_notifications SET acknowledged_at = ? WHERE id = ?",
+                (time.time(), notification_id),
+            )
+            return self._row(connection, "family_notifications", notification_id)
+
     def list_family_notifications(self, alert_id: int) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM family_notifications WHERE alert_id = ? ORDER BY sent_at", (alert_id,)
             )
             return [dict(r) for r in rows]
+
+    def list_family_notifications_for_recipient(self, recipient_user_id: int) -> list[dict[str, Any]]:
+        """Every accident notification this user has RECEIVED about a linked
+        family member's incident -- the recipient-facing counterpart to
+        notify_family_of_incident actually sending one. Without this, a
+        notification existed only as a row nobody's screen ever queried.
+
+        Coordinates are included ONLY when the driver's own share_location
+        setting for THIS recipient is on -- same consent rule
+        build_message enforces for the (never-delivered) mock SMS text;
+        the alert row itself always has the real coordinates, so this must
+        not just join and expose them unconditionally."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT fn.*, a.kind, a.status AS alert_status, a.risk_index, "
+                "a.latitude, a.longitude, a.user_id AS driver_id, u.name AS driver_name, "
+                "fl.requester_id, fl.requester_share_location, fl.recipient_share_location "
+                "FROM family_notifications fn "
+                "JOIN alerts a ON a.id = fn.alert_id "
+                "JOIN users u ON u.id = a.user_id "
+                "JOIN family_links fl ON fl.status = 'accepted' AND "
+                "  ((fl.requester_id = a.user_id AND fl.recipient_id = fn.recipient_user_id) OR "
+                "   (fl.recipient_id = a.user_id AND fl.requester_id = fn.recipient_user_id)) "
+                "WHERE fn.recipient_user_id = ? ORDER BY fn.sent_at DESC",
+                (recipient_user_id,),
+            )
+            out = []
+            for row in rows:
+                record = dict(row)
+                driver_is_requester = record["driver_id"] == record["requester_id"]
+                driver_shares = (
+                    record["requester_share_location"] if driver_is_requester
+                    else record["recipient_share_location"]
+                )
+                del record["requester_id"], record["requester_share_location"], record["recipient_share_location"]
+                if not driver_shares:
+                    record["latitude"] = None
+                    record["longitude"] = None
+                out.append(record)
+            return out
 
     @staticmethod
     def _decode_family_link(row: dict[str, Any], viewer_id: int | None = None) -> dict[str, Any]:
