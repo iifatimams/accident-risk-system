@@ -344,7 +344,11 @@ class SessionRecorder:
             return candidates[0]["identifier"]
         if not candidates:
             return "unresolved:none_assigned"
-        return "unresolved:ambiguous(" + ",".join(sorted(d["identifier"] for d in candidates)) + ")"
+        # identifier text alone may repeat across candidates (duplicate
+        # device names are allowed), so pair each with its own row id here
+        # to keep the ambiguous-device list actually distinguishing.
+        labels = sorted(f"{d['identifier']}#{d['id']}" for d in candidates)
+        return "unresolved:ambiguous(" + ",".join(labels) + ")"
 
     def _record_full_sample(
         self,

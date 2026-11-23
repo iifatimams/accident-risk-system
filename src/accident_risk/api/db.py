@@ -63,7 +63,13 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS devices (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     kind          TEXT    NOT NULL,
-    identifier    TEXT    NOT NULL UNIQUE,
+    -- Deliberately NOT UNIQUE: many cheap OBD-II BLE adapters broadcast the
+    -- exact same generic name (e.g. "OBDII"), so two distinct physical
+    -- devices legitimately share identical identifier text. Device
+    -- IDENTITY is the row's own id, never the identifier string -- see
+    -- devices.id, not identifier, used everywhere a specific device is
+    -- addressed.
+    identifier    TEXT    NOT NULL,
     status        TEXT    NOT NULL DEFAULT 'spare',
     assigned_to   INTEGER REFERENCES users(id) ON DELETE SET NULL,
     note          TEXT    NOT NULL DEFAULT '',
@@ -371,6 +377,44 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_client_incident_id "
             "ON alerts(client_incident_id)"
         )
+        self._migrate_devices_identifier_not_unique(connection)
+
+    @staticmethod
+    def _migrate_devices_identifier_not_unique(connection: sqlite3.Connection) -> None:
+        """A database created before this change has identifier UNIQUE,
+        which SQLite cannot drop with ALTER TABLE -- rebuild the table
+        instead, preserving every row (including assigned_to/status/note),
+        then restore it under the original name. A no-op once already
+        migrated: SQLite's own `CREATE TABLE IF NOT EXISTS devices` never
+        touches a devices table that already exists, so this only runs
+        while the old UNIQUE constraint is still actually present."""
+        has_unique = any(
+            row["unique"] and "identifier" in {
+                col["name"] for col in connection.execute(f"PRAGMA index_info({row['name']!r})")
+            }
+            for row in connection.execute("PRAGMA index_list(devices)")
+        )
+        if not has_unique:
+            return
+        connection.execute(
+            """
+            CREATE TABLE devices_new (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind          TEXT    NOT NULL,
+                identifier    TEXT    NOT NULL,
+                status        TEXT    NOT NULL DEFAULT 'spare',
+                assigned_to   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                note          TEXT    NOT NULL DEFAULT '',
+                created_at    REAL    NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO devices_new(id, kind, identifier, status, assigned_to, note, created_at) "
+            "SELECT id, kind, identifier, status, assigned_to, note, created_at FROM devices"
+        )
+        connection.execute("DROP TABLE devices")
+        connection.execute("ALTER TABLE devices_new RENAME TO devices")
 
     # ---------------------------------------------------------------- users
 
@@ -447,13 +491,10 @@ class Database:
         if kind not in DEVICE_KINDS:
             raise ValueError(f"Unknown device kind: {kind}")
         with self.connect() as connection:
-            try:
-                cursor = connection.execute(
-                    "INSERT INTO devices(kind, identifier, note, created_at) VALUES (?, ?, ?, ?)",
-                    (kind, identifier.strip(), note.strip(), time.time()),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ValueError("A device with that identifier already exists") from exc
+            cursor = connection.execute(
+                "INSERT INTO devices(kind, identifier, note, created_at) VALUES (?, ?, ?, ?)",
+                (kind, identifier.strip(), note.strip(), time.time()),
+            )
             return self._row(connection, "devices", int(cursor.lastrowid))
 
     def list_devices(self) -> list[dict[str, Any]]:
@@ -490,12 +531,9 @@ class Database:
 
         assignments = ", ".join(f"{key} = ?" for key in updates)
         with self.connect() as connection:
-            try:
-                connection.execute(
-                    f"UPDATE devices SET {assignments} WHERE id = ?", (*updates.values(), device_id)
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ValueError("A device with that identifier already exists") from exc
+            connection.execute(
+                f"UPDATE devices SET {assignments} WHERE id = ?", (*updates.values(), device_id)
+            )
             return self._row(connection, "devices", device_id)
 
     def kit_for_user(self, user_id: int) -> list[dict[str, Any]]:

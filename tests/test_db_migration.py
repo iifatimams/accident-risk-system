@@ -171,3 +171,79 @@ def test_opening_a_pre_evaluation_schema_database_adds_new_tables_without_data_l
 
     thresholds = database.effective_thresholds_at(time.time())
     assert thresholds["risk_high_threshold"] == 0.70
+
+
+def test_two_devices_may_share_an_identifier(tmp_path):
+    """Many cheap OBD-II BLE adapters broadcast the same generic name, so
+    identifier text is intentionally not unique -- device identity is the
+    row's own id."""
+    database = Database(tmp_path / "devices.sqlite3")
+    first = database.create_device("adapter", "OBDII")
+    second = database.create_device("adapter", "OBDII")
+    assert first["id"] != second["id"]
+    assert first["identifier"] == second["identifier"] == "OBDII"
+
+    renamed = database.update_device(second["id"], identifier="OBDII")
+    assert renamed["id"] == second["id"]
+
+
+def test_opening_a_pre_unique_identifier_database_drops_the_constraint_without_data_loss(tmp_path):
+    """A database created before identifier's UNIQUE constraint was removed
+    must migrate to allow duplicates, keeping every existing device row
+    (including its assignment) intact."""
+    db_path = tmp_path / "pre_unique_identifier.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO users(id, phone, name, role, created_at) VALUES (7, '+971500000007', 'Driver Seven', 'driver', ?)",
+        (time.time(),),
+    )
+    connection.execute(
+        """
+        CREATE TABLE devices (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind          TEXT    NOT NULL,
+            identifier    TEXT    NOT NULL UNIQUE,
+            status        TEXT    NOT NULL DEFAULT 'spare',
+            assigned_to   INTEGER,
+            note          TEXT    NOT NULL DEFAULT '',
+            created_at    REAL    NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO devices(id, kind, identifier, status, assigned_to, note, created_at) "
+        "VALUES (1, 'adapter', 'OBDII', 'active', 7, 'first unit', ?)",
+        (time.time(),),
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(db_path)
+
+    with database.connect() as connection:
+        unique_indexes = [
+            row["name"] for row in connection.execute("PRAGMA index_list(devices)") if row["unique"]
+        ]
+        assert not unique_indexes
+
+        row = connection.execute("SELECT * FROM devices WHERE id = 1").fetchone()
+        assert row["kind"] == "adapter"
+        assert row["identifier"] == "OBDII"
+        assert row["status"] == "active"
+        assert row["assigned_to"] == 7
+        assert row["note"] == "first unit"
+
+    second = database.create_device("adapter", "OBDII")
+    assert second["id"] != 1

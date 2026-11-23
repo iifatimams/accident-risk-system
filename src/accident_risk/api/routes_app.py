@@ -375,18 +375,21 @@ def create_router(
             ):
                 if not identifier:
                     continue
-                try:
+                # identifier text is no longer unique (duplicate OBD/wearable
+                # names are expected), so reuse an unassigned spare with this
+                # identifier if one exists, rather than always creating a new
+                # device row for what may be the same physical unit.
+                device = next(
+                    (
+                        d for d in database.list_devices()
+                        if d["kind"] == kind and d["identifier"] == identifier
+                        and d["assigned_to"] is None
+                    ),
+                    None,
+                )
+                if device is None:
                     device = database.create_device(kind, identifier)
-                except ValueError:
-                    device = next(
-                        (
-                            d for d in database.list_devices()
-                            if d["kind"] == kind and d["identifier"] == identifier
-                        ),
-                        None,
-                    )
-                if device is not None:
-                    database.update_device(device["id"], assigned_to=recipient["id"])
+                database.update_device(device["id"], assigned_to=recipient["id"])
         database.log_access(principal.user_id, principal.role, "family-links:request")
         try:
             return database.request_family_link(principal.user_id, recipient["id"])

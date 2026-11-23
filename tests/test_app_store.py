@@ -133,10 +133,13 @@ def test_kit_assignment_activates_and_clears(db, people):
     assert db.kit_for_user(people["driver"]["id"]) == []
 
 
-def test_device_identifier_is_unique(db):
-    db.create_device("adapter", "ELM-001")
-    with pytest.raises(ValueError):
-        db.create_device("adapter", "ELM-001")
+def test_device_identifier_need_not_be_unique(db):
+    """Many cheap OBD-II BLE adapters broadcast the exact same generic
+    name, so two distinct physical devices may legitimately share one
+    identifier -- device identity is the row's own id, not the text."""
+    first = db.create_device("adapter", "ELM-001")
+    second = db.create_device("adapter", "ELM-001")
+    assert first["id"] != second["id"]
 
 
 # --------------------------------------------------------------- sessions
