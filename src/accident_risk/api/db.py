@@ -385,16 +385,49 @@ class Database:
         """A database created before the family_links redesign (the earlier
         one-directional family_contacts design -- see family_links' own
         schema comment) still has this table's column named contact_id,
-        not recipient_user_id -- every query against this table (sending,
-        acknowledging, or listing a recipient's own notifications) was
-        silently broken against that database until renamed."""
+        AND its foreign key still points at the now-gone family_contacts
+        table rather than users -- every insert into this table (sending a
+        notification) was silently failing with a FOREIGN KEY constraint
+        error against that database, since contact_id values are real
+        users.id values, not family_contacts.id ones. A bare
+        `ALTER TABLE ... RENAME COLUMN` fixes the column name but leaves
+        the stale `REFERENCES family_contacts(id)` behind (SQLite does not
+        rewrite a column's own REFERENCES clause on rename), so this does
+        a full rebuild instead -- the same create/copy/drop/rename pattern
+        as _migrate_devices_identifier_not_unique, since neither renaming a
+        column's name nor its FK target is otherwise expressible via
+        ALTER TABLE."""
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'family_notifications'"
+        ).fetchone()
+        if row is None or "family_contacts" not in row["sql"]:
+            return
         existing_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(family_notifications)")
+            col["name"] for col in connection.execute("PRAGMA table_info(family_notifications)")
         }
-        if "contact_id" in existing_columns and "recipient_user_id" not in existing_columns:
-            connection.execute(
-                "ALTER TABLE family_notifications RENAME COLUMN contact_id TO recipient_user_id"
+        recipient_source = "contact_id" if "contact_id" in existing_columns else "recipient_user_id"
+        connection.execute(
+            """
+            CREATE TABLE family_notifications_new (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id           INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+                recipient_user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                sent_at            REAL    NOT NULL,
+                delivery_status    TEXT    NOT NULL,
+                acknowledge_token  TEXT    NOT NULL UNIQUE,
+                acknowledged_at    REAL,
+                UNIQUE(alert_id, recipient_user_id)
             )
+            """
+        )
+        connection.execute(
+            f"INSERT INTO family_notifications_new"
+            f"(id, alert_id, recipient_user_id, sent_at, delivery_status, acknowledge_token, acknowledged_at) "
+            f"SELECT id, alert_id, {recipient_source}, sent_at, delivery_status, acknowledge_token, acknowledged_at "
+            f"FROM family_notifications"
+        )
+        connection.execute("DROP TABLE family_notifications")
+        connection.execute("ALTER TABLE family_notifications_new RENAME TO family_notifications")
 
     @staticmethod
     def _migrate_devices_identifier_not_unique(connection: sqlite3.Connection) -> None:

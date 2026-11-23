@@ -249,35 +249,66 @@ def test_opening_a_pre_unique_identifier_database_drops_the_constraint_without_d
     assert second["id"] != 1
 
 
-def test_opening_a_pre_rename_family_notifications_database_renames_contact_id(tmp_path):
-    """A database created before the family_links redesign still has this
-    table's recipient column named contact_id, not recipient_user_id --
-    every query against it (send, acknowledge, or a recipient's own inbox)
-    was silently broken against such a database until renamed."""
-    db_path = tmp_path / "pre_rename_family_notifications.sqlite3"
-    connection = sqlite3.connect(db_path)
+def _create_pre_family_links_redesign_schema(path, *, recipient_column="contact_id"):
+    """Mimics the real pre-redesign family_notifications table: not just a
+    differently-named recipient column, but one whose foreign key still
+    targets the old, one-directional family_contacts table rather than
+    users -- every insert (sending a real notification) silently fails
+    with a FOREIGN KEY constraint error against this table, since the
+    column's values are real users.id values, not family_contacts.id
+    ones. recipient_column lets a test exercise the case where a prior,
+    incomplete migration already renamed the column but left the stale
+    FK target behind (a bare `ALTER TABLE ... RENAME COLUMN` cannot fix
+    a REFERENCES clause)."""
+    connection = sqlite3.connect(path)
     connection.execute(
-        """
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, name TEXT, "
+        "role TEXT, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+        "kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL)"
+    )
+    connection.execute("CREATE TABLE family_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+    connection.execute(
+        f"""
         CREATE TABLE family_notifications (
             id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-            alert_id           INTEGER NOT NULL,
-            contact_id         INTEGER NOT NULL,
+            alert_id           INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+            {recipient_column} INTEGER NOT NULL REFERENCES family_contacts(id) ON DELETE CASCADE,
             sent_at            REAL    NOT NULL,
             delivery_status    TEXT    NOT NULL,
             acknowledge_token  TEXT    NOT NULL UNIQUE,
             acknowledged_at    REAL,
-            UNIQUE(alert_id, contact_id)
+            UNIQUE(alert_id, {recipient_column})
         )
         """
     )
     connection.execute(
-        "INSERT INTO family_notifications"
-        "(id, alert_id, contact_id, sent_at, delivery_status, acknowledge_token) "
-        "VALUES (1, 1, 7, ?, 'mock_sent', 'tok-abc123')",
+        "INSERT INTO users(id, phone, name, role, created_at) VALUES (7, '+971500000007', 'Driver Seven', 'driver', ?)",
+        (time.time(),),
+    )
+    connection.execute(
+        "INSERT INTO users(id, phone, name, role, created_at) VALUES (8, '+971500000008', 'Driver Eight', 'driver', ?)",
+        (time.time(),),
+    )
+    connection.execute(
+        "INSERT INTO alerts(id, user_id, kind, status, created_at) VALUES (1, 7, 'collision', 'confirmed', ?)",
+        (time.time(),),
+    )
+    connection.execute(
+        f"INSERT INTO family_notifications"
+        f"(id, alert_id, {recipient_column}, sent_at, delivery_status, acknowledge_token) "
+        f"VALUES (1, 1, 7, ?, 'mock_sent', 'tok-abc123')",
         (time.time(),),
     )
     connection.commit()
     connection.close()
+
+
+def test_opening_a_pre_redesign_family_notifications_database_fixes_column_and_fk(tmp_path):
+    db_path = tmp_path / "pre_redesign_family_notifications.sqlite3"
+    _create_pre_family_links_redesign_schema(db_path, recipient_column="contact_id")
 
     database = Database(db_path)
 
@@ -291,3 +322,25 @@ def test_opening_a_pre_rename_family_notifications_database_renames_contact_id(t
 
     acknowledged = database.acknowledge_family_notification("tok-abc123")
     assert acknowledged is not None and acknowledged["acknowledged_at"] is not None
+
+    # The real bug: inserting a genuine notification used to fail with a
+    # FOREIGN KEY constraint error, since the stale FK pointed at
+    # family_contacts, not users -- id 7 here is a real users.id, not a
+    # family_contacts.id.
+    sent = database.record_family_notification(1, 8, "mock_sent")
+    assert sent is not None
+
+
+def test_opening_a_database_with_the_column_already_renamed_but_stale_fk_still_fixes_it(tmp_path):
+    """Covers a database caught mid-upgrade: an earlier, incomplete version
+    of this migration (RENAME COLUMN only) already fixed the column name
+    but left the FK target as family_contacts -- this must still be
+    rebuilt, not treated as already-migrated just because the column is
+    now spelled correctly."""
+    db_path = tmp_path / "renamed_but_stale_fk.sqlite3"
+    _create_pre_family_links_redesign_schema(db_path, recipient_column="recipient_user_id")
+
+    database = Database(db_path)
+
+    sent = database.record_family_notification(1, 8, "mock_sent")
+    assert sent is not None
