@@ -378,6 +378,23 @@ class Database:
             "ON alerts(client_incident_id)"
         )
         self._migrate_devices_identifier_not_unique(connection)
+        self._migrate_family_notifications_recipient_column(connection)
+
+    @staticmethod
+    def _migrate_family_notifications_recipient_column(connection: sqlite3.Connection) -> None:
+        """A database created before the family_links redesign (the earlier
+        one-directional family_contacts design -- see family_links' own
+        schema comment) still has this table's column named contact_id,
+        not recipient_user_id -- every query against this table (sending,
+        acknowledging, or listing a recipient's own notifications) was
+        silently broken against that database until renamed."""
+        existing_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(family_notifications)")
+        }
+        if "contact_id" in existing_columns and "recipient_user_id" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE family_notifications RENAME COLUMN contact_id TO recipient_user_id"
+            )
 
     @staticmethod
     def _migrate_devices_identifier_not_unique(connection: sqlite3.Connection) -> None:

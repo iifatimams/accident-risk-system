@@ -247,3 +247,47 @@ def test_opening_a_pre_unique_identifier_database_drops_the_constraint_without_d
 
     second = database.create_device("adapter", "OBDII")
     assert second["id"] != 1
+
+
+def test_opening_a_pre_rename_family_notifications_database_renames_contact_id(tmp_path):
+    """A database created before the family_links redesign still has this
+    table's recipient column named contact_id, not recipient_user_id --
+    every query against it (send, acknowledge, or a recipient's own inbox)
+    was silently broken against such a database until renamed."""
+    db_path = tmp_path / "pre_rename_family_notifications.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE family_notifications (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id           INTEGER NOT NULL,
+            contact_id         INTEGER NOT NULL,
+            sent_at            REAL    NOT NULL,
+            delivery_status    TEXT    NOT NULL,
+            acknowledge_token  TEXT    NOT NULL UNIQUE,
+            acknowledged_at    REAL,
+            UNIQUE(alert_id, contact_id)
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO family_notifications"
+        "(id, alert_id, contact_id, sent_at, delivery_status, acknowledge_token) "
+        "VALUES (1, 1, 7, ?, 'mock_sent', 'tok-abc123')",
+        (time.time(),),
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(db_path)
+
+    with database.connect() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(family_notifications)")}
+        assert "recipient_user_id" in columns
+        assert "contact_id" not in columns
+        row = connection.execute("SELECT * FROM family_notifications WHERE id = 1").fetchone()
+        assert row["recipient_user_id"] == 7
+        assert row["acknowledge_token"] == "tok-abc123"
+
+    acknowledged = database.acknowledge_family_notification("tok-abc123")
+    assert acknowledged is not None and acknowledged["acknowledged_at"] is not None
