@@ -17,7 +17,7 @@ from accident_risk.schemas import SENSOR_FIELDS
 
 SESSION_TIMEOUT_SECONDS = 180.0
 EDGE_FRESHNESS_SECONDS = 10.0
-UNCONFIRMED_INCIDENT_TIMEOUT_SECONDS = 180.0
+UNCONFIRMED_INCIDENT_TIMEOUT_SECONDS = 20.0
 
 # ios/RoadSense/Services/MultimodalRiskFusion.swift's fiveSecondAheadRisk
 # (PolidrivingFiveSecondModel.mlpackage, driver-held-out ROC-AUC 0.918 --

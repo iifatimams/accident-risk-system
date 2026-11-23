@@ -476,8 +476,11 @@ async function refreshDriver() {
       ).join("")}</tbody></table></div>`
     : `<p class="muted">No kit assigned yet. An administrator assigns one.</p>`;
 
-  if (data.pending_collision) showCollision(data.pending_collision);
-  else hideCollision();
+  if (data.pending_collision && data.pending_collision.id !== state.collisionTimedOutId) {
+    showCollision(data.pending_collision);
+  } else if (!data.pending_collision) {
+    hideCollision();
+  }
 }
 
 async function startSession() {
@@ -515,7 +518,21 @@ function showCollision(alert) {
   state.collisionTimer = setInterval(() => {
     left -= 1;
     $("#collision-count").textContent = Math.max(left, 0);
-    if (left <= 0) resolveCollision("confirm");
+    // No response in time -- never auto-CONFIRM (that would falsely claim
+    // the driver attested to a real collision they never tapped anything
+    // for). Just stop showing the screen; the server's own call-on-access
+    // sweep (UNCONFIRMED_INCIDENT_TIMEOUT_SECONDS, routes_app.py) moves
+    // the alert to unconfirmed_timeout and notifies family on its own,
+    // worded honestly as an unconfirmed sensor trigger.
+    if (left <= 0) {
+      clearInterval(state.collisionTimer);
+      $("#collision").hidden = true;
+      // Remembered so the NEXT poll (up to ~1s away, before the server's
+      // own sweep has necessarily run yet) doesn't re-show this same
+      // still-"awaiting_confirmation" alert and re-arm a fresh countdown.
+      state.collisionTimedOutId = state.collisionAlert;
+      state.collisionAlert = null;
+    }
   }, 1000);
 }
 

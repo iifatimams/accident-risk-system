@@ -801,7 +801,7 @@ def test_unconfirmed_collision_incident_times_out(client, app, people, monkeypat
     assert incident["status"] == "awaiting_confirmation"
 
     # Still within the window: no change yet, and nothing sent to family.
-    clock[0] += 60.0
+    clock[0] += 10.0
     still_waiting = client.get("/app/api/alerts", headers=headers).json()[0]
     assert still_waiting["status"] == "awaiting_confirmation"
     assert app.state.notification_sender.sent == []
@@ -809,7 +809,7 @@ def test_unconfirmed_collision_incident_times_out(client, app, people, monkeypat
     # Past the timeout window: the call-on-access sweep moves it AND
     # notifies family -- but the message must be honest that this is an
     # UNCONFIRMED sensor trigger, never worded as a verified accident.
-    clock[0] += 180.0
+    clock[0] += 20.0
     timed_out = client.get("/app/api/alerts", headers=headers).json()[0]
     assert timed_out["status"] == "unconfirmed_timeout"
     sent = app.state.notification_sender.sent
