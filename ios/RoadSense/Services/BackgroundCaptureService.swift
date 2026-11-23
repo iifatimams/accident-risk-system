@@ -130,6 +130,9 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
   @Published public var debugYaw: Double = 0.0
   @Published public var debugRoll: Double = 0.0
   @Published public var debugEAR: Double = 0.0
+  @Published public var debugGazeAvailable: Bool = false
+  @Published public var debugGazeVertical: Double = 0.0
+  @Published public var debugGazeHorizontal: Double = 0.0
   // MARK: Driver Attention
   // Discrete state (see DriverAttentionState.swift) debounced through
   // AttentionHysteresis. `eyesOnRoad` above is kept for backend/dashboard
@@ -750,6 +753,9 @@ public class VisionManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
       self.debugYaw = yaw
       self.debugRoll = roll
       self.debugEAR = avgEAR
+      self.debugGazeAvailable = combinedGaze != nil
+      self.debugGazeVertical = combinedGaze?.vertical ?? 0.0
+      self.debugGazeHorizontal = combinedGaze?.horizontal ?? 0.0
       self.postureCollapse = isCollapsed
       self.attentionState = committed
       self.eyesOnRoad = committed.isEyesOnRoad
@@ -1159,8 +1165,12 @@ public class BackgroundCaptureService:
       }
       // MARK: Vision Snapshot
       var leadTrackSnapshot: TrackedObject?
+      var frontProcessingLatencyMs: Double = 0.0
+      var backProcessingLatencyMs: Double = 0.0
       DispatchQueue.main.sync {
         leadTrackSnapshot = self.visionManager.leadTrack
+        frontProcessingLatencyMs = self.visionManager.frontProcessingLatencyMs
+        backProcessingLatencyMs = self.visionManager.backProcessingLatencyMs
         snapshot.eyesOnRoad =
           self.visionManager.eyesOnRoad
         snapshot.attentionState =
@@ -1193,6 +1203,12 @@ public class BackgroundCaptureService:
           self.visionManager.debugRoll
         snapshot.debugEAR =
           self.visionManager.debugEAR
+        snapshot.debugGazeAvailable =
+          self.visionManager.debugGazeAvailable
+        snapshot.debugGazeVertical =
+          self.visionManager.debugGazeVertical
+        snapshot.debugGazeHorizontal =
+          self.visionManager.debugGazeHorizontal
       }
       snapshot.weatherMultiplier = ContextManager.shared.weatherMultiplier
       snapshot.weatherConditionCode = ContextManager.shared.weatherConditionCode
@@ -1413,8 +1429,8 @@ public class BackgroundCaptureService:
       // Real, measured time from frame arrival to Vision completing (see
       // publishProcessingLatency) -- already computed, just never
       // previously sent to the backend.
-      payload["front_processing_latency_ms"] = self.frontProcessingLatencyMs
-      payload["back_processing_latency_ms"] = self.backProcessingLatencyMs
+      payload["front_processing_latency_ms"] = frontProcessingLatencyMs
+      payload["back_processing_latency_ms"] = backProcessingLatencyMs
       // Dashboard-only explainability, same status as camera_status/debug_*
       // elsewhere in this payload -- NOT part of the validated SensorFrame
       // schema, and the index itself remains experimental/uncalibrated

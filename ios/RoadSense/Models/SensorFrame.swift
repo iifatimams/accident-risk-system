@@ -79,6 +79,14 @@ public struct SensorFrame: Codable {
     public var debugYaw: Double = 0.0
     public var debugRoll: Double = 0.0
     public var debugEAR: Double = 0.0
+    /// Pupil-within-eye-socket vertical offset (DriverAttentionState.swift's
+    /// GazeOffset) -- the eye-gaze-alone signal that can flag a downward
+    /// look even when head pitch stays level (e.g. a phone held low).
+    /// `debugGazeAvailable` is false when pupil landmarks weren't reliably
+    /// found this frame, distinguishing "no reading" from a genuine 0.0.
+    public var debugGazeAvailable: Bool = false
+    public var debugGazeVertical: Double = 0.0
+    public var debugGazeHorizontal: Double = 0.0
     public var postureCollapse: Bool = false
     
     // Web UI Camera Feed (Disabled in production to prevent overheating)
@@ -182,6 +190,9 @@ public struct SensorFrame: Codable {
         dict["debug_yaw"] = debugYaw
         dict["debug_roll"] = debugRoll
         dict["debug_ear"] = debugEAR
+        dict["debug_gaze_available"] = debugGazeAvailable
+        dict["debug_gaze_vertical"] = debugGazeVertical
+        dict["debug_gaze_horizontal"] = debugGazeHorizontal
         dict["posture_collapse"] = postureCollapse
         dict["is_roundabout"] = isRoundabout
         dict["weather_multiplier"] = weatherMultiplier

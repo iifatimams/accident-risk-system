@@ -41,5 +41,12 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<!-- RoadSense is a driving dashboard, never meant to run in iPad
+	Split View/Slide Over -- this also exempts it from the all-orientations
+	and launch-storyboard requirements those multitasking modes need. -->
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict/>
 </dict>
 </plist>

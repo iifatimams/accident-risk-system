@@ -28,6 +28,8 @@ targets:
           backend.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        UIRequiresFullScreen: true
+        UILaunchScreen: {}
     entitlements:
       path: RoadSense/RoadSense.entitlements
     settings:
