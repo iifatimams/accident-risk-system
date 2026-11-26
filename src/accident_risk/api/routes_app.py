@@ -6,6 +6,7 @@ from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from accident_risk.api.auth import AuthError, AuthService, Principal, bearer_from_header
@@ -195,9 +196,14 @@ def create_router(
         index = prediction.overall_risk_index if active is True and prediction else None
         return index, active
 
-    def get_principal(authorization: Annotated[str | None, Header()] = None) -> Principal:
+    bearer = HTTPBearer(auto_error=False)
+
+    def get_principal(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ) -> Principal:
+        token = credentials.credentials.strip() if credentials else None
         try:
-            return auth.resolve(bearer_from_header(authorization))
+            return auth.resolve(token)
         except AuthError as exc:
             raise HTTPException(exc.status, exc.message) from exc
 
